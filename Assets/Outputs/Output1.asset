@@ -9,9 +9,18 @@ MonoBehaviour:
   m_GameObject: {fileID: 0}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: e6fae28ef90425643b4fc989c1b8815f, type: 3}
-  m_Name: Action 1
+  m_Script: {fileID: 11500000, guid: 8269c457755773149993ca833a3378f8, type: 3}
+  m_Name: Output1
   m_EditorClassIdentifier: 
-  action: 'Examine the crime scene.
-
-'
+  outputNumber: 0
+  outputs:
+  - What will you do?
+  - Your first result
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 

@@ -6,16 +6,25 @@ using UnityEngine.UI;
 
 public class Gameplay : MonoBehaviour
 {
-    [SerializeField] TextMeshProUGUI actionText;
-
-    [SerializeField] ActionSO action1;
-    [SerializeField] ActionSO action2;
+    [SerializeField]TextMeshProUGUI outputText;
+    [SerializeField]OutputSO output;
+    [SerializeField]StorySO story;
+    [SerializeField] GameObject[] actionButtons;
 
     void Start()
     {
-        actionText.text = action1.GetAction();
-
+        outputText.text = output.GetOutput(0);
+        for (int i=0; i<3; i++)
+        {
+            TextMeshProUGUI buttonText = actionButtons[i].GetComponentInChildren<TextMeshProUGUI>();
+            buttonText.text = story.GetAction(i);
+        }
+        
     }
 
+    public void OnActionSelected(int index)
+    {
+        outputText.text = output.GetOutput(index + 1);
+    }
 
 }
