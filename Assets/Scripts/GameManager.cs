@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using TMPro;
@@ -6,13 +7,12 @@ using UnityEngine.UI;
 
 public class GameManager : MonoBehaviour
 {
-    public TMP_Text[] clueTexts;
     public Button[] actionButtons; // 3 buttons
     public TMP_Text[] buttonTexts;
     public TMP_Text outputText;
 
     [SerializeField] private LLMStoryClient client;
-    [SerializeField] private Transform cluesGroupParent;
+    [SerializeField] private RectTransform cluesGroupParent;
     [SerializeField] private GameObject clueTemplate;
 
     private const string FallbackNewAction = "Investigate further.";
@@ -48,6 +48,9 @@ public class GameManager : MonoBehaviour
                 : FallbackNewAction;
             actionButtons[i].onClick.AddListener(() => OnActionClicked(index));
         }
+
+        if (clueTemplate != null)
+            clueTemplate.SetActive(false);
 
         PopulateClues(story);
     }
@@ -118,8 +121,27 @@ public class GameManager : MonoBehaviour
                 return;
 
         guessPhase = true;
-        suspectNames = StoryParser.ExtractSuspectNames(GameSession.Story.Suspects);
+        StartCoroutine(EnterGuessPhase());
+    }
+
+    private IEnumerator EnterGuessPhase()
+    {
         outputText.text = "Guess the murderer.";
+        SetButtonsInteractable(false);
+
+        // Suspects are normally ready long before this point (a background follow-up
+        // fetch, if one was even needed, has the entire rest of the playthrough to
+        // finish) - but give it a short grace period on the rare chance it's still
+        // in flight rather than immediately settling for generic labels.
+        float waited = 0f;
+        const float maxWait = 15f;
+        while (!GameSession.HasSuspects && waited < maxWait)
+        {
+            yield return new WaitForSeconds(1f);
+            waited += 1f;
+        }
+
+        suspectNames = GameSession.HasSuspects ? GameSession.SuspectNames : new List<string>();
 
         for (int i = 0; i < actionButtons.Length; i++)
         {
@@ -166,11 +188,11 @@ public class GameManager : MonoBehaviour
     {
         List<string> clueList = StoryParser.ExtractClueList(story.Clues);
 
-        for (int i = 0; i < clueTexts.Length; i++)
-            clueTexts[i].text = i < clueList.Count ? clueList[i] : "";
+        if (clueList.Count == 0)
+            Debug.LogWarning("No clues could be parsed from the story's Clues section. Raw text:\n" + story.Clues);
 
-        for (int i = clueTexts.Length; i < clueList.Count; i++)
-            AddClueEntry(clueList[i]);
+        foreach (string clue in clueList)
+            AddClueEntry(clue);
     }
 
     private void AddClueEntry(string clueText)
@@ -182,6 +204,50 @@ public class GameManager : MonoBehaviour
         clone.SetActive(true);
         TMP_Text text = clone.GetComponentInChildren<TMP_Text>();
         if (text != null)
-            text.text = clueText;
+            text.text = FormatClue(clueText);
+
+        RebuildCluesLayout();
+    }
+
+    private const int MaxClueLength = 300;
+
+    private static string FormatClue(string clueText)
+    {
+        string trimmed = TruncateClue(clueText.Trim());
+        bool alreadyBulleted = trimmed.StartsWith("-") || trimmed.StartsWith("•") || trimmed.StartsWith("*");
+        return alreadyBulleted ? trimmed : "- " + trimmed;
+    }
+
+    private static string TruncateClue(string clue)
+    {
+        if (clue.Length <= MaxClueLength)
+            return clue;
+
+        string truncated = clue.Substring(0, MaxClueLength);
+
+        // Prefer cutting at the last complete sentence within the limit so it doesn't
+        // trail off mid-thought.
+        int lastSentenceEnd = -1;
+        foreach (char punct in new[] { '.', '!', '?' })
+        {
+            int idx = truncated.LastIndexOf(punct);
+            if (idx > lastSentenceEnd)
+                lastSentenceEnd = idx;
+        }
+
+        if (lastSentenceEnd > 0)
+            return truncated.Substring(0, lastSentenceEnd + 1).Trim();
+
+        // No sentence boundary found - fall back to a clean word cut with an ellipsis.
+        int lastSpace = truncated.LastIndexOf(' ');
+        if (lastSpace > 0)
+            truncated = truncated.Substring(0, lastSpace);
+        return truncated.TrimEnd(',', ';', ':', ' ') + "...";
+    }
+
+    private void RebuildCluesLayout()
+    {
+        if (cluesGroupParent != null)
+            LayoutRebuilder.ForceRebuildLayoutImmediate(cluesGroupParent);
     }
 }

@@ -109,23 +109,45 @@ public static class StoryParser
 
         raw = raw.Replace("\r\n", "\n").Trim();
 
-        int endIndex = raw.IndexOf("### End", StringComparison.OrdinalIgnoreCase);
-        if (endIndex >= 0)
-            raw = raw.Substring(0, endIndex).Trim();
+        // The model sometimes keeps going past the current turn, hallucinating further
+        // rounds (or even a fake follow-up conversation) instead of stopping at "### End".
+        // None of these markers should ever legitimately appear inside its actual answer,
+        // so treat the earliest one found as a hard stop.
+        int cutoff = raw.Length;
+        foreach (string marker in new[] { "### Response:", "### Prompt:", "\n---", "\n##" })
+        {
+            int idx = raw.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0 && idx < cutoff)
+                cutoff = idx;
+        }
+
+        // The model doesn't always write the literal "### End" - sometimes it's just a
+        // bare "End" on its own line. Only match a *standalone* line (not "end" appearing
+        // mid-sentence in normal prose) to avoid false positives.
+        Match endMatch = Regex.Match(raw, @"^\s*#{0,3}\s*end\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+        if (endMatch.Success && endMatch.Index < cutoff)
+            cutoff = endMatch.Index;
+
+        raw = raw.Substring(0, cutoff).Trim();
 
         Match actionMatch = Regex.Match(raw, @"new\s+player\s+action\s*:", RegexOptions.IgnoreCase);
-        Match clueMatch = Regex.Match(raw, @"new\s+clue\s+discovered\s*:", RegexOptions.IgnoreCase);
+        Match clueMatch = Regex.Match(raw, @"new\s+clue\s+(discovered|found)\s*:", RegexOptions.IgnoreCase);
 
         int resultEnd = raw.Length;
         if (actionMatch.Success) resultEnd = Math.Min(resultEnd, actionMatch.Index);
         if (clueMatch.Success) resultEnd = Math.Min(resultEnd, clueMatch.Index);
-        result.Result = StripMarkers(raw.Substring(0, resultEnd));
+        result.Result = TruncateResult(StripMarkers(raw.Substring(0, resultEnd)));
 
         if (actionMatch.Success)
         {
             int start = actionMatch.Index + actionMatch.Length;
             int end = clueMatch.Success && clueMatch.Index > actionMatch.Index ? clueMatch.Index : raw.Length;
-            result.NewAction = StripMarkers(raw.Substring(start, end - start));
+            string actionBlock = StripMarkers(raw.Substring(start, end - start));
+
+            // The model was asked for exactly one action but sometimes replies with a
+            // numbered/bulleted list anyway - take just the first item when that happens.
+            List<string> items = ExtractListItems(actionBlock);
+            result.NewAction = items.Count > 0 ? items[0] : actionBlock;
         }
 
         if (clueMatch.Success)
@@ -133,7 +155,7 @@ public static class StoryParser
             int start = clueMatch.Index + clueMatch.Length;
             int end = actionMatch.Success && actionMatch.Index > clueMatch.Index ? actionMatch.Index : raw.Length;
             string clueText = StripMarkers(raw.Substring(start, end - start));
-            if (!string.IsNullOrEmpty(clueText) && !clueText.Equals("None", StringComparison.OrdinalIgnoreCase))
+            if (!IsNoClue(clueText))
                 result.NewClue = clueText;
         }
 
@@ -142,13 +164,56 @@ public static class StoryParser
 
     public static List<string> ExtractClueList(string cluesText)
     {
-        return ExtractListItems(cluesText);
+        List<string> items = ExtractListItems(cluesText);
+        if (items.Count > 0)
+            return items;
+
+        // Some responses list each clue under its own "Clue #1:" sub-header instead of
+        // a single "Clues:" heading with a bulleted list underneath - fall back to that.
+        items = ExtractSubHeaderItems(cluesText, "clue");
+        if (items.Count > 0)
+            return items;
+
+        // No bullets, numbers, or sub-headers at all - if the model just wrote one plain
+        // sentence instead of a list, treat that whole block as a single clue rather
+        // than silently dropping it.
+        if (!string.IsNullOrWhiteSpace(cluesText) && Regex.IsMatch(cluesText, @"[A-Za-z0-9]"))
+            items.Add(cluesText.Trim());
+
+        return items;
+    }
+
+    private static List<string> ExtractSubHeaderItems(string content, string headerWord)
+    {
+        var items = new List<string>();
+        if (string.IsNullOrEmpty(content))
+            return items;
+
+        MatchCollection matches = Regex.Matches(content, headerWord + @"\s*#?\s*\d+\s*:", RegexOptions.IgnoreCase);
+        if (matches.Count == 0)
+            return items;
+
+        for (int i = 0; i < matches.Count; i++)
+        {
+            int start = matches[i].Index + matches[i].Length;
+            int end = i + 1 < matches.Count ? matches[i + 1].Index : content.Length;
+            string item = StripMarkers(content.Substring(start, end - start));
+            if (Regex.IsMatch(item, @"[A-Za-z0-9]"))
+                items.Add(item);
+        }
+        return items;
     }
 
     public static List<string> ExtractSuspectNames(string suspectsText)
     {
+        List<string> lines = ExtractListItems(suspectsText);
+        if (lines.Count == 0)
+            // Some responses list each suspect under its own "Suspect #1:" sub-header
+            // instead of a bulleted list - fall back to that.
+            lines = ExtractSubHeaderItems(suspectsText, "suspect");
+
         var names = new List<string>();
-        foreach (string item in ExtractListItems(suspectsText))
+        foreach (string item in lines)
         {
             string name = ExtractName(item);
             if (!string.IsNullOrEmpty(name))
@@ -167,11 +232,60 @@ public static class StoryParser
         return (commaIndex >= 0 ? suspectLine.Substring(0, commaIndex) : suspectLine).Trim();
     }
 
+    private static bool IsNoClue(string clueText)
+    {
+        if (string.IsNullOrWhiteSpace(clueText))
+            return true;
+
+        // The model's "no clue" answer varies ("None", "None.", "No new clue", etc.) -
+        // normalize away trailing punctuation before comparing instead of requiring an
+        // exact match.
+        string normalized = clueText.Trim().TrimEnd('.', '!').Trim();
+        return normalized.Equals("None", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("No new clue", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private const int MaxResultLength = 350;
+
+    private static string TruncateResult(string result)
+    {
+        if (result.Length <= MaxResultLength)
+            return result;
+
+        // The model is asked to stay under 300 characters, but that's a request, not
+        // a guarantee - clamp hard so a rambling response can't break the UI. Prefer
+        // cutting at the last complete sentence within the limit so it doesn't trail
+        // off mid-word.
+        string truncated = result.Substring(0, MaxResultLength);
+
+        int lastSentenceEnd = -1;
+        foreach (char punct in new[] { '.', '!', '?' })
+        {
+            int idx = truncated.LastIndexOf(punct);
+            if (idx > lastSentenceEnd)
+                lastSentenceEnd = idx;
+        }
+        if (lastSentenceEnd > 0)
+            return truncated.Substring(0, lastSentenceEnd + 1).Trim();
+
+        int lastSpace = truncated.LastIndexOf(' ');
+        if (lastSpace > 0)
+            truncated = truncated.Substring(0, lastSpace);
+        return truncated.TrimEnd(',', ';', ':', ' ') + "...";
+    }
+
     private static string StripMarkers(string content)
     {
-        int markerIndex = content.IndexOf("####");
-        if (markerIndex >= 0)
-            content = content.Substring(0, markerIndex);
+        // Strip stray "#"/"##"/"###"/"####" style section-marker lines the model sometimes
+        // injects between paragraphs - whether bare or with leftover echoed prompt text
+        // trailing after the hashes (e.g. "### At least 5").
+        content = Regex.Replace(content, @"^\s*#+.*$", "", RegexOptions.Multiline);
+        content = Regex.Replace(content, @"\n{3,}", "\n\n");
+
+        // TMP doesn't render markdown, so raw "**bold**" syntax just shows as literal
+        // asterisks - strip it everywhere rather than only trimming the ends.
+        content = content.Replace("**", "");
         return content.Trim();
     }
 
@@ -183,7 +297,13 @@ public static class StoryParser
 
         MatchCollection matches = Regex.Matches(content, @"^\s*(?:\d+[\.\)]|[-*•])\s*(.+)$", RegexOptions.Multiline);
         foreach (Match m in matches)
-            items.Add(m.Groups[1].Value.Trim());
+        {
+            string item = m.Groups[1].Value.Trim();
+            // Skip degenerate matches like a lone "*" or "-" left over from a malformed
+            // bullet with no real content after it.
+            if (Regex.IsMatch(item, @"[A-Za-z0-9]"))
+                items.Add(item);
+        }
         return items;
     }
 
