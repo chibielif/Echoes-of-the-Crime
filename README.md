@@ -27,3 +27,8 @@ fine-tune the model that powers case generation.
 Open the project in Unity Hub and press Play from the `MainMenu` scene.
 An LLM endpoint must be configured (`Assets/Config/LLMEndpointConfig.asset`,
 not tracked in git since it holds an API key) for case generation to work.
+
+The UI uses the "Cartoon GUI Pack" Asset Store package, which isn't
+included in this repo (its EULA doesn't allow redistributing the raw
+source files) — re-import it from the Asset Store into
+`Assets/GUIPackCartoon/` if you're building the project from source.

@@ -18,6 +18,10 @@
 /.idea/
 /.vscode/
 
+# Third-party Asset Store package - Standard EULA doesn't allow
+# redistributing the raw source files, only shipping them in a build
+/Assets/GUIPackCartoon/
+
 # MemoryCaptures can get excessive in size.
 # They also could contain extremely sensitive data
 /[Mm]emoryCaptures/
