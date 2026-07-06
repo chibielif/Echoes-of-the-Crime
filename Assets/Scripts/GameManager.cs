@@ -1,130 +1,187 @@
-using System.Collections;
 using System.Collections.Generic;
+using System.Text;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro;
 
 public class GameManager : MonoBehaviour
 {
-    public TMP_Text[] clueTexts; // Clue metinleri için TextMeshPro array
-    private bool[] clueRevealed; // Hangi clue'lar gösterildi, kontrol için
-
+    public TMP_Text[] clueTexts;
     public Button[] actionButtons; // 3 buttons
-    public TMP_Text[] buttonTexts; // TMP versions of button labels
+    public TMP_Text[] buttonTexts;
     public TMP_Text outputText;
 
-    private string[,] actions = new string[3, 3]
-    {
-        { "Examine the bullet casing for fingerprints or DNA.", 
-            "Confront the ex-employee about why he kept the gun and whether he had any reason to want revenge against Mr. Lennox.", 
-            "Ask Mrs. Lennox if she ever saw the painting herself." },
-        { "Search the safe for any hidden compartments or documents.", 
-            "Compare the receipt to other purchases made around that time to see if anyone else bought anything similar.", 
-            "Ask Miss Bray why she purchased the painting and whether she knows anything about its history." },
-        { "Interview Miss Bray about her recent interactions with the victim.", 
-            "Confront Miss Bray about why she didn’t tell anyone else about the painting and whether she knew anything about its previous owner or where it came from.", 
-            "Search the law firm’s trash bins for any shredded documents related to the painting or Miss Bray’s involvement." }
-    };
-    
-    // Her action'a karşılık gelen özel açıklama
-    private string[,] actionOutputs = new string[3, 3]
-    {
-        {
-            "The bullet casing was matched to a gun owned by a former employee of the Lennox estate who had been fired six months ago. " +
-            "His prints were still on file.",
-            "The ex-employee, Mr. Rex Mills, denied ever owning the gun or having any motive to harm Mr. Lennox. He said he had only kept it as a souvenir from his time working at the estate.\n\nHowever, when asked about the painting, he became visibly upset and said he had seen it disappear shortly after it arrived at the house. He claimed he had told Mr. Lennox about it but was ignored.\n",
-            "Mrs. Lennox confirmed that she had seen the painting once, but it had been taken down soon after she mentioned it to her husband. She said she didn’t know where it went or who might have taken it.\n\nWhen asked about the note left near the body, she said she hadn’t written it and didn’t recognize the handwriting. However, she did admit that she had argued with her husband over the painting earlier that day and had accused him of hiding something important.\n"
-        },
-        {
-            "The safe was opened using a key that wasn’t on the ring given to Mrs. Lennox. Inside, there was a small envelope labeled ‘For Vincent Only.’ " +
-            "Inside was a receipt dated three days ago for a purchase made under a fake name.",
-            "The receipt matches another purchase made at the same store under a different name — Miss Tessa Bray, the family lawyer.",
-            "Miss Bray admitted to purchasing the painting but said she had done so on behalf of Mr. Lennox as part of a secret deal. She said he had wanted to keep it hidden from his wife because he feared she would sell it for profit."
-        },
-        {
-            "Miss Bray confirmed that she had met with Mr. Lennox several times over the past week to discuss the painting and how best to hide it from his wife.\nShe said he had become increasingly paranoid about someone finding out about the purchase and had asked her to keep it quiet until he could figure out what to do with it.\n",
-            "Miss Bray admitted that she had been hired by a third party to steal the painting and plant evidence to make it look like Mr. Lennox had killed himself.\nShe said she had been paid to keep the painting hidden and had been instructed to destroy any records linking her to the transaction.\n",
-            "The trash bin behind Miss Bray’s office contained a torn piece of paper with a partial address written in pencil. When compared to the receipt found in the safe, it matched the address listed as the buyer’s contact information."
-        }
-    };
+    [SerializeField] private LLMStoryClient client;
+    [SerializeField] private Transform cluesGroupParent;
+    [SerializeField] private GameObject clueTemplate;
 
-    private string[] suspects = { "Mrs. Lennox, the victim's wife", "Miss Tessa Bray, the family lawyer", "Mr. Jasper Hale, a rival art dealer" };
-    private string correctSuspect = "Miss Tessa Bray, the family lawyer";
+    private const string FallbackNewAction = "Investigate further.";
 
-    private int[] actionIndices = new int[3]; // to track each button's progress
-    private bool suspectsPhase = false;
+    private class ActionBranch
+    {
+        public int StepsTaken;
+        public bool IsComplete => StepsTaken >= 3;
+    }
+
+    private readonly ActionBranch[] branches = { new ActionBranch(), new ActionBranch(), new ActionBranch() };
+    private readonly List<(string Action, string Result)> allHistory = new List<(string, string)>();
+    private List<string> suspectNames;
+    private bool guessPhase;
 
     void Start()
     {
+        ParsedStory story = GameSession.Story;
+        if (story == null)
+        {
+            outputText.text = "No case has been generated yet. Start from the Main Menu.";
+            SetButtonsInteractable(false);
+            return;
+        }
+
+        string[] initialActions = GameSession.InitialActions;
         outputText.text = "What will you do?";
         for (int i = 0; i < actionButtons.Length; i++)
         {
             int index = i;
-            buttonTexts[i].text = actions[i, 0];
+            buttonTexts[i].text = initialActions != null && i < initialActions.Length && !string.IsNullOrEmpty(initialActions[i])
+                ? initialActions[i]
+                : FallbackNewAction;
             actionButtons[i].onClick.AddListener(() => OnActionClicked(index));
         }
-        clueRevealed = new bool[clueTexts.Length];
-        for (int i = 0; i < clueTexts.Length; i++)
-        {
-            clueTexts[i].text = ""; // Başta boş olsun
-        }
 
+        PopulateClues(story);
     }
 
-    void OnActionClicked(int buttonIndex)
+    private void OnActionClicked(int index)
     {
-        if (!suspectsPhase)
+        if (guessPhase)
         {
-            int step = actionIndices[buttonIndex];
-            outputText.text = actionOutputs[buttonIndex, step];
-
-            
-            // 1. butonun 1. action'u seçildiyse
-            if (buttonIndex == 0 && step == 0 && !clueRevealed[0])
-            {
-                clueTexts[0].text = "The ex-employee admitted to keeping the gun because he believed Mr. Lennox had stolen something valuable from him during a recent renovation project. " +
-                                    "He said he had seen the victim handling the painting before it disappeared.";
-                clueRevealed[0] = true;
-            }
-
-            // 1. butonun 2. adımı
-            if (buttonIndex == 0 && step == 1 && !clueRevealed[1])
-            {
-                clueTexts[1].text = "The painting may have been hidden somewhere else in the house.";
-                clueRevealed[1] = true;
-            }
-            
-            // 2. butonun 2. adımı
-            if (buttonIndex == 1 && step == 1 && !clueRevealed[1])
-            {
-                clueTexts[2].text = "Miss Bray may have been involved in the theft of the painting.";
-                clueRevealed[2] = true;
-            }
-
-            if (step < 2)
-            {
-                actionIndices[buttonIndex]++;
-                buttonTexts[buttonIndex].text = actions[buttonIndex, actionIndices[buttonIndex]];
-            }
-
-            if (actionIndices[0] >= 2 && actionIndices[1] >= 2 && actionIndices[2] >= 2)
-            {
-                suspectsPhase = true;
-                outputText.text = "Who is the criminal?";
-                for (int i = 0; i < 3; i++)
-                {
-                    buttonTexts[i].text = suspects[i];
-                }
-            }
+            HandleGuess(index);
+            return;
         }
+
+        ActionBranch branch = branches[index];
+        if (branch.IsComplete)
+            return;
+
+        string currentAction = buttonTexts[index].text;
+        bool isFinalStep = branch.StepsTaken == 2;
+        string previousActionsText = BuildHistoryText(allHistory);
+
+        SetButtonsInteractable(false);
+        outputText.text = "...";
+
+        StartCoroutine(client.RequestActionResult(
+            GameSession.RawStory,
+            previousActionsText,
+            currentAction,
+            isFinalStep,
+            response => OnActionResultSuccess(index, currentAction, response),
+            OnActionResultError));
+    }
+
+    private void OnActionResultSuccess(int index, string actionTaken, ActionResponse response)
+    {
+        ActionBranch branch = branches[index];
+        string result = string.IsNullOrEmpty(response.Result) ? "..." : response.Result;
+        allHistory.Add((actionTaken, result));
+        branch.StepsTaken++;
+
+        outputText.text = result + (response.NewClue != null ? "\n\nNew clue found." : "");
+
+        if (response.NewClue != null)
+            AddClueEntry(response.NewClue);
+
+        if (branch.IsComplete)
+            actionButtons[index].interactable = false;
         else
+            buttonTexts[index].text = string.IsNullOrEmpty(response.NewAction) ? FallbackNewAction : response.NewAction;
+
+        RefreshButtonInteractability();
+        CheckForGuessPhase();
+    }
+
+    private void OnActionResultError(string message)
+    {
+        Debug.LogError("Action request failed: " + message);
+        outputText.text = "Something went wrong processing that action. Try again.";
+        RefreshButtonInteractability();
+    }
+
+    private void CheckForGuessPhase()
+    {
+        if (guessPhase)
+            return;
+
+        foreach (ActionBranch branch in branches)
+            if (!branch.IsComplete)
+                return;
+
+        guessPhase = true;
+        suspectNames = StoryParser.ExtractSuspectNames(GameSession.Story.Suspects);
+        outputText.text = "Guess the murderer.";
+
+        for (int i = 0; i < actionButtons.Length; i++)
         {
-            string chosenSuspect = buttonTexts[buttonIndex].text;
-            if (chosenSuspect == correctSuspect)
-                outputText.text = "You solved the case! " +
-                                  "Real Murderer: Miss Tessa Bray, the family lawyer.\n\nMotive: To steal the painting and frame Mr. Lennox for its disappearance.\n\nDecisive Proof:\n- The receipt found in the safe matches one purchased by Miss Bray under a false name.\n- Miss Bray admitted to being hired by a third party to steal the painting and plant evidence to make it look like self-defense.\n- The torn piece of paper found in the trash bin matches the address listed on the receipt.\n";
-            else
-                outputText.text = "That's not the criminal. Try again.";
+            buttonTexts[i].text = i < suspectNames.Count ? suspectNames[i] : $"Suspect {i + 1}";
+            actionButtons[i].interactable = true;
         }
+    }
+
+    private void HandleGuess(int index)
+    {
+        string suspect = buttonTexts[index].text;
+        outputText.text = $"You accused {suspect}. (Resolution logic coming soon.)";
+    }
+
+    private void RefreshButtonInteractability()
+    {
+        for (int i = 0; i < actionButtons.Length; i++)
+            actionButtons[i].interactable = !branches[i].IsComplete;
+    }
+
+    private void SetButtonsInteractable(bool interactable)
+    {
+        foreach (Button b in actionButtons)
+            b.interactable = interactable;
+    }
+
+    private static string BuildHistoryText(List<(string Action, string Result)> history)
+    {
+        if (history.Count == 0)
+            return "None yet.";
+
+        var sb = new StringBuilder();
+        for (int i = 0; i < history.Count; i++)
+        {
+            sb.Append("Action: ").Append(history[i].Action).Append('\n');
+            sb.Append("Result: ").Append(history[i].Result);
+            if (i < history.Count - 1)
+                sb.Append("\n\n");
+        }
+        return sb.ToString();
+    }
+
+    private void PopulateClues(ParsedStory story)
+    {
+        List<string> clueList = StoryParser.ExtractClueList(story.Clues);
+
+        for (int i = 0; i < clueTexts.Length; i++)
+            clueTexts[i].text = i < clueList.Count ? clueList[i] : "";
+
+        for (int i = clueTexts.Length; i < clueList.Count; i++)
+            AddClueEntry(clueList[i]);
+    }
+
+    private void AddClueEntry(string clueText)
+    {
+        if (clueTemplate == null || cluesGroupParent == null)
+            return;
+
+        GameObject clone = Instantiate(clueTemplate, cluesGroupParent);
+        clone.SetActive(true);
+        TMP_Text text = clone.GetComponentInChildren<TMP_Text>();
+        if (text != null)
+            text.text = clueText;
     }
 }

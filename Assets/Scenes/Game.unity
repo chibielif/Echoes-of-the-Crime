@@ -2205,6 +2205,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1900367012}
   - component: {fileID: 1900367011}
+  - component: {fileID: 1900367013}
   m_Layer: 0
   m_Name: GameManager
   m_TagString: Untagged
@@ -2237,6 +2238,9 @@ MonoBehaviour:
   - {fileID: 406114827}
   - {fileID: 1028903644}
   outputText: {fileID: 1275921691}
+  client: {fileID: 1900367013}
+  cluesGroupParent: {fileID: 293300999}
+  clueTemplate: {fileID: 630553025}
 --- !u!4 &1900367012
 Transform:
   m_ObjectHideFlags: 0
@@ -2252,6 +2256,19 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1900367013
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1900367010}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9faa15ebc0eab0b4e94b8a0d0b776601, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  config: {fileID: 11400000, guid: 5d6dfbc020021374c93b0e22ad9cb8fb, type: 2}
 --- !u!224 &2015726051 stripped
 RectTransform:
   m_CorrespondingSourceObject: {fileID: 7219777585391373532, guid: 4b848ab1164e40b4eb03d9ee207a7f86, type: 3}
