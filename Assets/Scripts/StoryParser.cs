@@ -52,7 +52,15 @@ public static class StoryParser
         matches.Sort((a, b) => a.Match.Index.CompareTo(b.Match.Index));
 
         if (matches.Count == 0)
+        {
+            // The model occasionally abandons every section header and writes a pure
+            // narrative instead. Rather than discard the whole response, show it as
+            // the Crime Summary so the Story scene isn't left completely blank -
+            // Suspects/Clues/Initial Actions still get filled in via their own
+            // follow-up requests regardless of the original formatting.
+            result.CrimeSummary = StripMarkers(raw);
             return result;
+        }
 
         result.Title = StripMarkers(raw.Substring(0, matches[0].Match.Index)).Trim('*', '#', ' ', '\n');
 
@@ -64,10 +72,15 @@ public static class StoryParser
 
             switch (matches[i].Key)
             {
-                case "CrimeSummary": result.CrimeSummary = content; break;
-                case "Victim": result.Victim = content; break;
-                case "CrimeScene": result.CrimeScene = content; break;
-                case "Suspects": result.Suspects = content; break;
+                // These four are displayed as whole paragraph blocks (not extracted item
+                // by item like Clues/Actions), so any trailing junk the model tacks on
+                // after the real content - a stray fragment, an echoed prompt phrase, or
+                // anything else - needs trimming at the section level: cut at the last
+                // genuine sentence and discard whatever follows.
+                case "CrimeSummary": result.CrimeSummary = TrimTrailingJunk(content); break;
+                case "Victim": result.Victim = TrimTrailingJunk(content); break;
+                case "CrimeScene": result.CrimeScene = TrimTrailingJunk(content); break;
+                case "Suspects": result.Suspects = TrimTrailingJunk(content); break;
                 case "Clues": result.Clues = content; break;
                 case "RealMurderer": result.RealMurderer = content; break;
                 case "InitialActions": result.InitialActions = ExtractNumberedLines(content); break;
@@ -131,7 +144,12 @@ public static class StoryParser
         raw = raw.Substring(0, cutoff).Trim();
 
         Match actionMatch = Regex.Match(raw, @"new\s+player\s+action\s*:", RegexOptions.IgnoreCase);
-        Match clueMatch = Regex.Match(raw, @"new\s+clue\s+(discovered|found)\s*:", RegexOptions.IgnoreCase);
+
+        // The model's phrasing for this header varies ("New clue discovered:", "New Clue
+        // Found:", "New Clue Discovered?", bare "New Clue:", etc.) - match "new clue"
+        // followed by anything up to whichever terminator it used (colon, period, or
+        // question mark) rather than chasing each exact wording.
+        Match clueMatch = Regex.Match(raw, @"new\s+clue[^:.?\n]*[:.?]", RegexOptions.IgnoreCase);
 
         int resultEnd = raw.Length;
         if (actionMatch.Success) resultEnd = Math.Min(resultEnd, actionMatch.Index);
@@ -146,18 +164,27 @@ public static class StoryParser
 
             // The model was asked for exactly one action but sometimes replies with a
             // numbered/bulleted list anyway - take just the first item when that happens.
+            // It also sometimes writes multiple plain sentences with no bullets at all
+            // (e.g. "Investigate X... Continue the investigation.") - cutting at the
+            // first genuine sentence end catches that case too.
             List<string> items = ExtractListItems(actionBlock);
-            result.NewAction = items.Count > 0 ? items[0] : actionBlock;
+            result.NewAction = TruncateToFirstSentence(items.Count > 0 ? items[0] : actionBlock);
         }
 
         if (clueMatch.Success)
         {
             int start = clueMatch.Index + clueMatch.Length;
             int end = actionMatch.Success && actionMatch.Index > clueMatch.Index ? actionMatch.Index : raw.Length;
-            string clueText = StripMarkers(raw.Substring(start, end - start));
+            string clueText = StripLeadingAffirmation(StripMarkers(raw.Substring(start, end - start)));
             if (!IsNoClue(clueText))
                 result.NewClue = clueText;
         }
+
+        // Sometimes the model doesn't clearly separate "what happened" from "the new
+        // clue" and effectively only writes the latter - if the result ended up empty,
+        // show the clue text there too rather than leaving the output blank.
+        if (string.IsNullOrWhiteSpace(result.Result) && !string.IsNullOrEmpty(result.NewClue))
+            result.Result = result.NewClue;
 
         return result;
     }
@@ -206,7 +233,7 @@ public static class StoryParser
 
     public static List<string> ExtractSuspectNames(string suspectsText)
     {
-        List<string> lines = ExtractListItems(suspectsText);
+        List<string> lines = ExtractSuspectEntries(suspectsText);
         if (lines.Count == 0)
             // Some responses list each suspect under its own "Suspect #1:" sub-header
             // instead of a bulleted list - fall back to that.
@@ -222,6 +249,39 @@ public static class StoryParser
         return names;
     }
 
+    private static List<string> ExtractSuspectEntries(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return new List<string>();
+
+        // Standard case: suspects themselves are bulleted/numbered.
+        List<string> bulletItems = ExtractListItems(content).FindAll(item => !LooksLikeAlibiOrContradiction(item));
+        if (bulletItems.Count > 0)
+            return bulletItems;
+
+        // Some responses instead write each suspect's name+description as a plain
+        // paragraph, only bulleting "- Alibi:"/"- Contradiction:" sub-details
+        // underneath rather than the suspects themselves. Treat each paragraph
+        // (blank-line-separated block) that isn't itself one of those sub-details as
+        // one suspect entry.
+        var entries = new List<string>();
+        foreach (string paragraph in Regex.Split(content.Trim(), @"\n\s*\n"))
+        {
+            string firstLine = Regex.Replace(paragraph.Trim().Split('\n')[0], @"^[-*•]\s*", "").Trim();
+            if (!string.IsNullOrEmpty(firstLine)
+                && !LooksLikeAlibiOrContradiction(firstLine)
+                && Regex.IsMatch(firstLine, @"[A-Za-z]"))
+                entries.Add(firstLine);
+        }
+        return entries;
+    }
+
+    private static bool LooksLikeAlibiOrContradiction(string line)
+    {
+        string trimmed = Regex.Replace(line, @"^[-*•]\s*", "");
+        return Regex.IsMatch(trimmed, @"^(alibi|contradiction)\s*:", RegexOptions.IgnoreCase);
+    }
+
     private static string ExtractName(string suspectLine)
     {
         Match bold = Regex.Match(suspectLine, @"\*\*(.+?)\*\*");
@@ -230,6 +290,13 @@ public static class StoryParser
 
         int commaIndex = suspectLine.IndexOf(',');
         return (commaIndex >= 0 ? suspectLine.Substring(0, commaIndex) : suspectLine).Trim();
+    }
+
+    private static string StripLeadingAffirmation(string text)
+    {
+        // E.g. "New Clue Discovered? Yes - Lila may have..." - the actual clue starts
+        // after the "Yes" confirmation, not with it.
+        return Regex.Replace(text, @"^\s*yes\s*[,\-–—]?\s*", "", RegexOptions.IgnoreCase);
     }
 
     private static bool IsNoClue(string clueText)
@@ -255,19 +322,18 @@ public static class StoryParser
 
         // The model is asked to stay under 300 characters, but that's a request, not
         // a guarantee - clamp hard so a rambling response can't break the UI. Prefer
-        // cutting at the last complete sentence within the limit so it doesn't trail
-        // off mid-word.
+        // cutting at the last complete sentence within the limit (Result is allowed up
+        // to 2 sentences, unlike actions/clues) so it doesn't trail off mid-word - using
+        // the same abbreviation-aware boundary check so a title like "Mr."/"Mrs." isn't
+        // mistaken for the sentence end.
         string truncated = result.Substring(0, MaxResultLength);
 
-        int lastSentenceEnd = -1;
-        foreach (char punct in new[] { '.', '!', '?' })
+        MatchCollection sentenceEnds = SentenceEndRegex.Matches(truncated);
+        if (sentenceEnds.Count > 0)
         {
-            int idx = truncated.LastIndexOf(punct);
-            if (idx > lastSentenceEnd)
-                lastSentenceEnd = idx;
+            Match last = sentenceEnds[sentenceEnds.Count - 1];
+            return truncated.Substring(0, last.Index + 1).Trim();
         }
-        if (lastSentenceEnd > 0)
-            return truncated.Substring(0, lastSentenceEnd + 1).Trim();
 
         int lastSpace = truncated.LastIndexOf(' ');
         if (lastSpace > 0)
@@ -281,6 +347,21 @@ public static class StoryParser
         // injects between paragraphs - whether bare or with leftover echoed prompt text
         // trailing after the hashes (e.g. "### At least 5").
         content = Regex.Replace(content, @"^\s*#+.*$", "", RegexOptions.Multiline);
+
+        // It also sometimes closes a section with a bare "End" line (no "#" prefix) -
+        // strip that too, but only as a standalone line so "end" appearing naturally
+        // inside a sentence isn't affected.
+        content = Regex.Replace(content, @"^\s*end\s*$", "", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+
+        // Echoed fragment from our own prompt's "5. At least 5 Clues" list item,
+        // occasionally leaking into the output on its own line.
+        content = Regex.Replace(content, @"^\s*at\s+least\s+\d+\s*$", "", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+
+        // The model occasionally leaks literal internal-template-looking placeholder
+        // tokens like "{LIST_RESULT}: {GENERATE_ACTION}" - strip any line built out of
+        // one or more "{ALL_CAPS}" style tokens.
+        content = Regex.Replace(content, @"^\s*(\{[A-Z_]+\}\s*:?\s*)+$", "", RegexOptions.Multiline);
+
         content = Regex.Replace(content, @"\n{3,}", "\n\n");
 
         // TMP doesn't render markdown, so raw "**bold**" syntax just shows as literal
@@ -312,7 +393,40 @@ public static class StoryParser
         var actions = new string[3];
         List<string> items = ExtractListItems(content);
         for (int i = 0; i < items.Count && i < 3; i++)
-            actions[i] = items[i];
+            actions[i] = TruncateToFirstSentence(items[i]);
         return actions;
+    }
+
+    // Matches a sentence-ending ./!/? only when followed by whitespace+capital letter or
+    // the end of the string, and NOT immediately preceded by a common title abbreviation
+    // (whose following word is capitalized too, e.g. "Mrs. Marlowe" - the naive
+    // followed-by-capital check alone would wrongly treat "Mrs." itself as the end).
+    private static readonly Regex SentenceEndRegex = new Regex(
+        @"(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|Capt|Lt|Col|Gen|Rev|Sgt|Fr|Hon))[.!?](?=\s+[A-Z]|\s*$)",
+        RegexOptions.IgnoreCase);
+
+    private static string TruncateToFirstSentence(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+
+        Match m = SentenceEndRegex.Match(text);
+        return m.Success ? text.Substring(0, m.Index + 1).Trim() : text.Trim();
+    }
+
+    private static string TrimTrailingJunk(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return content;
+
+        // Keep everything through the LAST genuine sentence in the block (not just the
+        // first, since these sections are meant to be full paragraphs) and discard
+        // anything after it - whatever that trailing fragment says.
+        MatchCollection matches = SentenceEndRegex.Matches(content);
+        if (matches.Count == 0)
+            return content.Trim();
+
+        Match last = matches[matches.Count - 1];
+        return content.Substring(0, last.Index + 1).Trim();
     }
 }

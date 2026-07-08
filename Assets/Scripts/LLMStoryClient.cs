@@ -111,10 +111,41 @@ public class LLMStoryClient : MonoBehaviour
             onError);
     }
 
+    private const string CluesFollowUpPromptTemplate =
+        "<s>### Prompt:\n" +
+        "You are a detective game designer. Based on this murder mystery story:\n\n" +
+        "{0}\n\n" +
+        "List at least 3 clues for this case (some may be misleading). Format them clearly under the heading \"Clues:\" as a numbered list, each written as a single complete sentence no more than 200 characters.\n\n" +
+        "### Response:";
+
+    public IEnumerator RequestClues(string fullStory, Action<List<string>> onSuccess, Action<string> onError)
+    {
+        if (config == null || string.IsNullOrEmpty(config.endpointUrl))
+        {
+            onError?.Invoke("LLM endpoint config is not assigned.");
+            yield break;
+        }
+
+        var samplingParams = new SamplingParams
+        {
+            max_tokens = 300,
+            temperature = 0.8f,
+            top_p = 0.95f,
+            repetition_penalty = 1.1f
+        };
+
+        string prompt = string.Format(CluesFollowUpPromptTemplate, fullStory);
+
+        yield return SendPrompt(prompt, samplingParams,
+            text => onSuccess?.Invoke(StoryParser.ExtractClueList(text)),
+            onError);
+    }
+
     private const string ActionPromptTemplate =
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
         "Real murderer is not yet known by the player.\n\n" +
+        "Known Clues So Far:\n{3}\n\n" +
         "Previous Player Actions and Results:\n{1}\n\n" +
         "Current Player Action: {2}\n\n" +
         "Describe the result of the player's action briefly in no more than 2 sentences.\n" +
@@ -132,6 +163,7 @@ public class LLMStoryClient : MonoBehaviour
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
         "Real murderer is not yet known by the player.\n\n" +
+        "Known Clues So Far:\n{3}\n\n" +
         "Previous Player Actions and Results:\n{1}\n\n" +
         "Current Player Action: {2}\n\n" +
         "Describe the result of the player's action briefly in no more than 2 sentences.\n" +
@@ -144,7 +176,7 @@ public class LLMStoryClient : MonoBehaviour
         "### Response:";
 
     public IEnumerator RequestActionResult(string storyContext, string previousActionsAndResults, string currentAction,
-        bool isFinalStep, Action<ActionResponse> onSuccess, Action<string> onError)
+        bool isFinalStep, string knownClues, Action<ActionResponse> onSuccess, Action<string> onError)
     {
         if (config == null || string.IsNullOrEmpty(config.endpointUrl))
         {
@@ -154,7 +186,7 @@ public class LLMStoryClient : MonoBehaviour
 
         var samplingParams = new SamplingParams
         {
-            max_tokens = 300,
+            max_tokens = 400,
             temperature = UnityEngine.Random.Range(0.7f, 1.0f),
             top_p = UnityEngine.Random.Range(0.85f, 0.98f),
             repetition_penalty = 1.1f,
@@ -162,7 +194,7 @@ public class LLMStoryClient : MonoBehaviour
         };
 
         string template = isFinalStep ? FinalActionPromptTemplate : ActionPromptTemplate;
-        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction);
+        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues);
 
         yield return SendPrompt(prompt, samplingParams,
             text => onSuccess?.Invoke(StoryParser.ParseActionResponse(text)),

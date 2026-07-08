@@ -10,6 +10,7 @@ public class LoadingController : MonoBehaviour
 
     private int actionsAttempts;
     private int suspectsAttempts;
+    private int cluesAttempts;
     private int pendingBackgroundFetches;
 
     void Start()
@@ -24,8 +25,9 @@ public class LoadingController : MonoBehaviour
 
         bool needsActions = !GameSession.HasInitialActions;
         bool needsSuspects = !GameSession.HasSuspects;
+        bool needsClues = !GameSession.HasClues;
 
-        if (needsActions || needsSuspects)
+        if (needsActions || needsSuspects || needsClues)
         {
             // Keep this object (and its LLMStoryClient) alive across the scene change so
             // any follow-up requests can finish in the background while the player is
@@ -44,6 +46,12 @@ public class LoadingController : MonoBehaviour
         {
             pendingBackgroundFetches++;
             StartCoroutine(client.RequestSuspects(GameSession.RawStory, OnSuspectsSuccess, OnSuspectsError));
+        }
+
+        if (needsClues)
+        {
+            pendingBackgroundFetches++;
+            StartCoroutine(client.RequestClues(GameSession.RawStory, OnCluesSuccess, OnCluesError));
         }
 
         SceneManager.LoadScene("Story");
@@ -94,6 +102,29 @@ public class LoadingController : MonoBehaviour
         // playthrough - by then the player has invested real time, so fall back to the
         // generic "Suspect 1/2/3" labels (already handled in GameManager) rather than
         // throwing away their progress.
+        FinishBackgroundFetch();
+    }
+
+    private void OnCluesSuccess(List<string> clues)
+    {
+        GameSession.SetClues(clues);
+        FinishBackgroundFetch();
+    }
+
+    private void OnCluesError(string message)
+    {
+        Debug.LogWarning("Follow-up clues request failed: " + message);
+
+        cluesAttempts++;
+        if (cluesAttempts < 2)
+        {
+            StartCoroutine(client.RequestClues(GameSession.RawStory, OnCluesSuccess, OnCluesError));
+            return;
+        }
+
+        // Clues are flavor/deduction aids, not a hard requirement for the game to
+        // function - if they never come through, just leave the panel empty rather
+        // than blocking or discarding the player's progress.
         FinishBackgroundFetch();
     }
 
