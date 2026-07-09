@@ -11,6 +11,7 @@ public class LoadingController : MonoBehaviour
     private int actionsAttempts;
     private int suspectsAttempts;
     private int cluesAttempts;
+    private int murdererAttempts;
     private int pendingBackgroundFetches;
 
     void Start()
@@ -26,8 +27,9 @@ public class LoadingController : MonoBehaviour
         bool needsActions = !GameSession.HasInitialActions;
         bool needsSuspects = !GameSession.HasSuspects;
         bool needsClues = !GameSession.HasClues;
+        bool needsMurderer = !GameSession.HasRealMurderer;
 
-        if (needsActions || needsSuspects || needsClues)
+        if (needsActions || needsSuspects || needsClues || needsMurderer)
         {
             // Keep this object (and its LLMStoryClient) alive across the scene change so
             // any follow-up requests can finish in the background while the player is
@@ -52,6 +54,12 @@ public class LoadingController : MonoBehaviour
         {
             pendingBackgroundFetches++;
             StartCoroutine(client.RequestClues(GameSession.RawStory, OnCluesSuccess, OnCluesError));
+        }
+
+        if (needsMurderer)
+        {
+            pendingBackgroundFetches++;
+            StartCoroutine(client.RequestRealMurderer(GameSession.RawStory, OnMurdererSuccess, OnMurdererError));
         }
 
         SceneManager.LoadScene("Story");
@@ -125,6 +133,31 @@ public class LoadingController : MonoBehaviour
         // Clues are flavor/deduction aids, not a hard requirement for the game to
         // function - if they never come through, just leave the panel empty rather
         // than blocking or discarding the player's progress.
+        FinishBackgroundFetch();
+    }
+
+    private void OnMurdererSuccess(string murderer)
+    {
+        GameSession.SetRealMurderer(murderer);
+        FinishBackgroundFetch();
+    }
+
+    private void OnMurdererError(string message)
+    {
+        Debug.LogWarning("Follow-up real murderer request failed: " + message);
+
+        murdererAttempts++;
+        if (murdererAttempts < 2)
+        {
+            StartCoroutine(client.RequestRealMurderer(GameSession.RawStory, OnMurdererSuccess, OnMurdererError));
+            return;
+        }
+
+        // Not required for the Game scene to function (unlike actions) and, unlike
+        // suspects/clues, never shown directly to the player - GameManager's
+        // guess-resolution and LLMStoryClient's per-turn prompts already treat a
+        // missing Real Murderer as indeterminate/"not clearly specified" rather than
+        // crashing or blocking progress, so just leave it unset if it never comes through.
         FinishBackgroundFetch();
     }
 

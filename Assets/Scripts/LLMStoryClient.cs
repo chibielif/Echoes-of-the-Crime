@@ -27,7 +27,11 @@ public class LLMStoryClient : MonoBehaviour
         "Important: Each of the 3 initial actions must be a single short sentence, no more than 100 characters. " +
         "This limit applies ONLY to those 3 actions - the Crime Summary, Victim, Crime Scene, Suspects, and Clues " +
         "sections must still be written in full as descriptive paragraphs, not shortened.\n" +
-        "Important: You MUST end your response with \"Initial Player Actions:\" followed by exactly 3 numbered actions.\n\n" +
+        "Important: You MUST end your response with \"Initial Player Actions:\" followed by exactly 3 numbered actions.\n" +
+        "Important: The \"Real Murderer:\" section MUST include a one-sentence motive (why they did it) and one " +
+        "specific piece of decisive proof - never just a name alone. The decisive proof MUST correspond to one of " +
+        "the clues you already listed under \"Clues:\" above - do not invent a new piece of evidence the player " +
+        "never had access to.\n\n" +
         "### Response:";
 
     private const string FollowUpPromptTemplate =
@@ -141,42 +145,87 @@ public class LLMStoryClient : MonoBehaviour
             onError);
     }
 
+    private const string RealMurdererFollowUpPromptTemplate =
+        "<s>### Prompt:\n" +
+        "You are a detective game designer. Based on this murder mystery story:\n\n" +
+        "{0}\n\n" +
+        "Name the real murderer for this case. Format your answer clearly under the heading \"Real Murderer:\".\n" +
+        "Important: You MUST include a one-sentence motive (why they did it) and one specific piece of decisive " +
+        "proof - never write just a name alone.\n" +
+        "Important: The decisive proof MUST correspond to one of the clues already listed in the story above - " +
+        "do not invent a new piece of evidence the player never had access to.\n\n" +
+        "Now, name the murderer with a motive and decisive proof that matches one of the clues already listed " +
+        "above:\n\n" +
+        "### Response:";
+
+    public IEnumerator RequestRealMurderer(string fullStory, Action<string> onSuccess, Action<string> onError)
+    {
+        if (config == null || string.IsNullOrEmpty(config.endpointUrl))
+        {
+            onError?.Invoke("LLM endpoint config is not assigned.");
+            yield break;
+        }
+
+        var samplingParams = new SamplingParams
+        {
+            max_tokens = 200,
+            temperature = 0.8f,
+            top_p = 0.95f,
+            repetition_penalty = 1.1f,
+            seed = UnityEngine.Random.Range(1, 999999)
+        };
+
+        string prompt = string.Format(RealMurdererFollowUpPromptTemplate, fullStory);
+
+        yield return SendPrompt(prompt, samplingParams,
+            text => onSuccess?.Invoke(StoryParser.ParseRealMurderer(text)),
+            onError);
+    }
+
     private const string ActionPromptTemplate =
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
-        "Real murderer is not yet known by the player.\n\n" +
+        "SECRET (do NOT reveal to the player): the real murderer is {4}. Every result you write must stay " +
+        "consistent with this fact and must never contradict or give it away.\n\n" +
         "Known Clues So Far:\n{3}\n\n" +
         "Previous Player Actions and Results:\n{1}\n\n" +
-        "Current Player Action: {2}\n\n" +
-        "Describe the result of the player's action briefly in no more than 2 sentences.\n" +
+        "THE DETECTIVE'S CURRENT ACTION: \"{2}\"\n\n" +
+        "Describe the result of ONLY that action, briefly in no more than 2 sentences. Do not describe a " +
+        "different action or continue a previous one.\n" +
         "After generating the result, provide exactly one logical action that a detective player might take after seeing the result. Format the action clearly after the heading \"New Player Action:\".\n" +
-        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" (write 'None' if no new clue).\n" +
+        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
+        "single sentence (write 'None' if no new clue). Never list more than one clue here.\n" +
         "Do NOT reveal the murderer to the player.\n" +
         "Important: Your result MUST be no more than 300 characters.\n" +
-        "Important: If a new clue is found, it must be a single complete sentence no more than 200 characters.\n" +
+        "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
         "Important: The new action must be a single short sentence, no more than 100 characters.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
-        "Now, generate the result and action below:\n\n" +
+        "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
+        "Now, write the result of this exact action: \"{2}\"\n\n" +
         "### Response:";
 
     private const string FinalActionPromptTemplate =
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
-        "Real murderer is not yet known by the player.\n\n" +
+        "SECRET (do NOT reveal to the player): the real murderer is {4}. Every result you write must stay " +
+        "consistent with this fact and must never contradict or give it away.\n\n" +
         "Known Clues So Far:\n{3}\n\n" +
         "Previous Player Actions and Results:\n{1}\n\n" +
-        "Current Player Action: {2}\n\n" +
-        "Describe the result of the player's action briefly in no more than 2 sentences.\n" +
-        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" (write 'None' if no new clue).\n" +
+        "THE DETECTIVE'S CURRENT ACTION: \"{2}\"\n\n" +
+        "Describe the result of ONLY that action, briefly in no more than 2 sentences. Do not describe a " +
+        "different action or continue a previous one.\n" +
+        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
+        "single sentence (write 'None' if no new clue). Never list more than one clue here.\n" +
         "Do NOT reveal the murderer to the player.\n" +
         "Important: Your result MUST be no more than 300 characters.\n" +
-        "Important: If a new clue is found, it must be a single complete sentence no more than 200 characters.\n" +
+        "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
-        "Now, generate the result and action below:\n\n" +
+        "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
+        "Now, write the result of this exact action: \"{2}\"\n\n" +
         "### Response:";
 
     public IEnumerator RequestActionResult(string storyContext, string previousActionsAndResults, string currentAction,
-        bool isFinalStep, string knownClues, Action<ActionResponse> onSuccess, Action<string> onError)
+        bool isFinalStep, string knownClues, string realMurderer, Action<ActionResponse> onSuccess, Action<string> onError)
     {
         if (config == null || string.IsNullOrEmpty(config.endpointUrl))
         {
@@ -193,8 +242,15 @@ public class LLMStoryClient : MonoBehaviour
             seed = UnityEngine.Random.Range(1, 999999)
         };
 
+        // The initial story doesn't always yield a clean "Real Murderer:" section (Rule #1
+        // in CLAUDE.md - this model drifts from format constantly) - fall back to a neutral
+        // instruction rather than formatting an empty string into the prompt.
+        string murderer = string.IsNullOrWhiteSpace(realMurderer)
+            ? "not clearly specified - stay consistent with the story and clues as already written"
+            : realMurderer;
+
         string template = isFinalStep ? FinalActionPromptTemplate : ActionPromptTemplate;
-        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues);
+        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues, murderer);
 
         yield return SendPrompt(prompt, samplingParams,
             text => onSuccess?.Invoke(StoryParser.ParseActionResponse(text)),

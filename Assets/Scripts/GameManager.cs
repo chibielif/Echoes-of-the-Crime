@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using TMPro;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public class GameManager : MonoBehaviour
@@ -30,6 +31,11 @@ public class GameManager : MonoBehaviour
     private List<string> suspectNames;
     private bool awaitingGuessPrompt;
     private bool guessPhase;
+    private bool gameEnded;
+
+    private const int MaxGuesses = 2;
+    private int guessesRemaining = MaxGuesses;
+    private int murdererIndex = -1;
 
     void Start()
     {
@@ -60,6 +66,13 @@ public class GameManager : MonoBehaviour
 
     private void OnActionClicked(int index)
     {
+        if (gameEnded)
+        {
+            if (index == actionButtons.Length - 1)
+                SceneManager.LoadScene("MainMenu");
+            return;
+        }
+
         if (guessPhase)
         {
             HandleGuess(index);
@@ -90,6 +103,7 @@ public class GameManager : MonoBehaviour
             currentAction,
             isFinalStep,
             BuildCluesText(),
+            GameSession.RealMurderer,
             response => OnActionResultSuccess(index, currentAction, response),
             OnActionResultError));
     }
@@ -164,6 +178,16 @@ public class GameManager : MonoBehaviour
         guessPhase = true;
         suspectNames = GameSession.HasSuspects ? GameSession.SuspectNames : new List<string>();
 
+        // Fewer than 3 real suspects means every button below falls back to a generic
+        // "Suspect N" label with no real mapping to check a guess against - force
+        // indeterminate rather than resolving an index against those fallback labels.
+        murdererIndex = GameSession.HasSuspects ? GameSession.DetermineMurdererIndex() : -1;
+        // GameSession.SuspectNames could in principle hold more entries than the 3
+        // buttons shown (e.g. an over-long Suspects list) - clamp defensively so a
+        // later buttonTexts[murdererIndex] lookup can never throw.
+        if (murdererIndex >= actionButtons.Length)
+            murdererIndex = -1;
+
         for (int i = 0; i < actionButtons.Length; i++)
         {
             buttonTexts[i].text = i < suspectNames.Count ? suspectNames[i] : $"Suspect {i + 1}";
@@ -174,7 +198,51 @@ public class GameManager : MonoBehaviour
     private void HandleGuess(int index)
     {
         string suspect = buttonTexts[index].text;
-        outputText.text = $"You accused {suspect}. (Resolution logic coming soon.)";
+
+        if (murdererIndex < 0)
+        {
+            EndGame("The evidence doesn't clearly point to any one suspect here - there's no way to call this one right or wrong." + BuildRevealSuffix());
+            return;
+        }
+
+        if (index == murdererIndex)
+        {
+            EndGame($"You were right. {suspect} did it.{BuildRevealSuffix()}");
+            return;
+        }
+
+        guessesRemaining--;
+        actionButtons[index].interactable = false;
+
+        if (guessesRemaining <= 0)
+        {
+            string actualName = buttonTexts[murdererIndex].text;
+            EndGame($"Wrong again. It wasn't {suspect} - it was {actualName}.{BuildRevealSuffix()}");
+            return;
+        }
+
+        outputText.text = $"That's not them. {guessesRemaining} guess{(guessesRemaining == 1 ? "" : "es")} left.";
+    }
+
+    private static string BuildRevealSuffix() =>
+        GameSession.HasRealMurderer ? $"\n\nHere's what really happened:\n\n{GameSession.RealMurderer}" : "";
+
+    private void EndGame(string message)
+    {
+        gameEnded = true;
+        outputText.text = message;
+
+        for (int i = 0; i < actionButtons.Length; i++)
+            actionButtons[i].interactable = false;
+
+        // The reveal message (motive + decisive proof, sometimes lengthy) can run long
+        // enough to visually overlap a button in the first slot - putting "Return to
+        // Main Menu" in the last slot instead gives it the most clearance.
+        int lastIndex = actionButtons.Length - 1;
+        for (int i = 0; i < lastIndex; i++)
+            buttonTexts[i].text = "";
+        buttonTexts[lastIndex].text = "Return to Main Menu";
+        actionButtons[lastIndex].interactable = true;
     }
 
     private void RefreshButtonInteractability()
@@ -238,6 +306,15 @@ public class GameManager : MonoBehaviour
             return false; // Incomplete/truncated fragment with no real sentence end -
                            // skip it rather than show the player a confusing half-sentence.
 
+        // Despite "Known Clues So Far" being in every action prompt, the model
+        // sometimes restates an already-discovered clue verbatim instead of finding
+        // something new (weak instruction-following, same root cause as everywhere
+        // else in this project) - skip an exact repeat rather than padding the panel
+        // (and every later turn's "Known Clues So Far" context) with the same fact
+        // twice, and don't let the caller claim "New clue found." for it.
+        if (allClues.Contains(formatted))
+            return false;
+
         allClues.Add(formatted);
 
         if (clueTemplate == null || cluesGroupParent == null)
@@ -265,14 +342,6 @@ public class GameManager : MonoBehaviour
         return alreadyBulleted ? trimmed : "- " + trimmed;
     }
 
-    // Matches a sentence-ending ./!/? only when followed by whitespace+capital letter or
-    // the end of the string, and NOT immediately preceded by a common title abbreviation
-    // (whose following word is capitalized too, e.g. "Mrs. Marlowe" - the naive
-    // followed-by-capital check alone would wrongly treat "Mrs." itself as the end).
-    private static readonly Regex SentenceEndRegex = new Regex(
-        @"(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|Capt|Lt|Col|Gen|Rev|Sgt|Fr|Hon))[.!?](?=\s+[A-Z]|\s*$)",
-        RegexOptions.IgnoreCase);
-
     private static string TruncateClue(string clue)
     {
         // Clues are meant to be a single sentence - cut at the first genuine sentence
@@ -280,14 +349,16 @@ public class GameManager : MonoBehaviour
         // meta-commentary, a second unrelated clue, etc.) never makes it into the
         // display. If there's no real sentence end at all, the model's generation was
         // most likely cut off mid-thought - discard it rather than show a fragment.
-        Match sentenceEnd = SentenceEndRegex.Match(clue);
+        // Uses StoryParser.SentenceEndRegex rather than a separate copy, so this and the
+        // parser's own truncation logic can't drift out of sync with each other.
+        Match sentenceEnd = StoryParser.SentenceEndRegex.Match(clue);
         if (!sentenceEnd.Success)
             return null;
 
-        string sentence = clue.Substring(0, sentenceEnd.Index + 1).Trim();
+        string sentence = clue.Substring(0, sentenceEnd.Index + sentenceEnd.Length).Trim();
 
         if (sentence.Length <= MaxClueLength)
-            return sentence;
+            return CapitalizeFirstLetter(sentence);
 
         // Extremely long single "sentence" (e.g. missing punctuation) - fall back to a
         // clean word cut with an ellipsis so it doesn't overflow the UI.
@@ -295,7 +366,21 @@ public class GameManager : MonoBehaviour
         int lastSpace = truncated.LastIndexOf(' ');
         if (lastSpace > 0)
             truncated = truncated.Substring(0, lastSpace);
-        return truncated.TrimEnd(',', ';', ':', ' ') + "...";
+        return CapitalizeFirstLetter(truncated.TrimEnd(',', ';', ':', ' ') + "...");
+    }
+
+    // A clue is meant to read as its own standalone sentence, but sometimes survives
+    // starting lowercase - e.g. stripping a leading "Yes, " affirmation off a
+    // self-answered yes/no question can leave a naturally-lowercase continuation
+    // behind ("Yes, according to her statement..." -> "according to her statement...").
+    // Capitalizing the first letter doesn't recover a lost antecedent the model never
+    // stated outside that stripped "Yes," context, but at least reads as a complete
+    // sentence instead of a visibly truncated fragment.
+    private static string CapitalizeFirstLetter(string text)
+    {
+        if (string.IsNullOrEmpty(text) || !char.IsLower(text[0]))
+            return text;
+        return char.ToUpper(text[0]) + text.Substring(1);
     }
 
     private void RebuildCluesLayout()
