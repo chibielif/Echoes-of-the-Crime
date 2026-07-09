@@ -25,6 +25,12 @@ public static class GameSession
             Story.InitialActions = actions;
     }
 
+    public static void SetRealMurderer(string murderer)
+    {
+        if (Story != null)
+            Story.RealMurderer = murderer;
+    }
+
     public static void SetSuspectNames(List<string> names)
     {
         SuspectNames = names ?? new List<string>();
@@ -46,12 +52,24 @@ public static class GameSession
 
     public static bool HasClues => Clues != null && Clues.Count > 0;
 
+    public static string RealMurderer => Story?.RealMurderer;
+
+    public static bool HasRealMurderer => !string.IsNullOrWhiteSpace(RealMurderer);
+
+    // Computed live rather than cached, since SuspectNames can still change via a
+    // background follow-up fetch (SetSuspectNames) before the guess phase begins.
+    public static int DetermineMurdererIndex() => StoryParser.DetermineMurdererIndex(SuspectNames, RealMurderer);
+
     private static bool IsMissingExpectedFields(ParsedStory story)
     {
         if (string.IsNullOrEmpty(story.CrimeSummary)) return true;
         if (string.IsNullOrEmpty(story.Victim)) return true;
         if (string.IsNullOrEmpty(story.CrimeScene)) return true;
         if (string.IsNullOrEmpty(story.Suspects)) return true;
+        // Every per-turn action prompt depends on knowing who the murderer actually is
+        // (see LLMStoryClient.RequestActionResult) - missing this is worse than missing
+        // flavor text, since the model has nothing to stay consistent with.
+        if (string.IsNullOrEmpty(story.RealMurderer)) return true;
         return !HasInitialActions;
     }
 
