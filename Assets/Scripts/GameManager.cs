@@ -26,7 +26,24 @@ public class GameManager : MonoBehaviour
     }
 
     private readonly ActionBranch[] branches = { new ActionBranch(), new ActionBranch(), new ActionBranch() };
-    private readonly List<(string Action, string Result)> allHistory = new List<(string, string)>();
+
+    // Each action branch is bound to one specific suspect (by index, matching
+    // GameSession.SuspectNames/the guess-phase button order) and keeps its own history
+    // and discovered clues, entirely separate from the other two branches - see the
+    // "Suspect-bound action branches" note in CLAUDE.md for why.
+    private readonly List<(string Action, string Result)>[] branchHistories =
+        { new List<(string, string)>(), new List<(string, string)>(), new List<(string, string)>() };
+    private readonly List<string>[] branchClues = { new List<string>(), new List<string>(), new List<string>() };
+    private string[] branchSuspectNames = new string[3];
+
+    // The initial story's own clue list is shared baseline knowledge for every branch
+    // (like reading the case file), unlike clues discovered mid-branch which are scoped
+    // to whichever branch found them.
+    private readonly List<string> initialClues = new List<string>();
+
+    // Flat, combined view of every clue found so far (initial + all branches) - used for
+    // the Clues panel display and for cross-branch duplicate detection, independent of
+    // the per-branch lists used to build each branch's own prompt context.
     private readonly List<string> allClues = new List<string>();
     private List<string> suspectNames;
     private bool awaitingGuessPrompt;
@@ -46,6 +63,18 @@ public class GameManager : MonoBehaviour
             SetButtonsInteractable(false);
             return;
         }
+
+        // Bind each branch to a specific suspect up front, by index - matching
+        // GameSession.SuspectNames' order (and therefore the guess-phase button order
+        // too, for free). Suspects are normally ready well before this point (the same
+        // reasoning EnterGuessPhase already relies on - Loading/Story gave any needed
+        // follow-up fetch plenty of time), so this is read synchronously rather than
+        // waited on, same as GameSession.InitialActions just below. Falls back to
+        // generic labels if fewer than 3 real names are available, same fallback text
+        // already used for the guess-phase buttons.
+        List<string> namesForBranches = GameSession.HasSuspects ? GameSession.SuspectNames : new List<string>();
+        for (int i = 0; i < branchSuspectNames.Length; i++)
+            branchSuspectNames[i] = i < namesForBranches.Count ? namesForBranches[i] : $"Suspect {i + 1}";
 
         string[] initialActions = GameSession.InitialActions;
         outputText.text = "What will you do?";
@@ -92,7 +121,10 @@ public class GameManager : MonoBehaviour
 
         string currentAction = buttonTexts[index].text;
         bool isFinalStep = branch.StepsTaken == 2;
-        string previousActionsText = BuildHistoryText(allHistory);
+        // Each branch only ever sees its own history, never the other two branches' -
+        // this is what stops the model from treating a different branch's action as a
+        // continuation of this one's last result (confirmed in an actual playthrough).
+        string previousActionsText = BuildHistoryText(branchHistories[index]);
 
         SetButtonsInteractable(false);
         outputText.text = "...";
@@ -102,8 +134,9 @@ public class GameManager : MonoBehaviour
             previousActionsText,
             currentAction,
             isFinalStep,
-            BuildCluesText(),
+            BuildCluesText(index),
             GameSession.RealMurderer,
+            branchSuspectNames[index],
             response => OnActionResultSuccess(index, currentAction, response),
             OnActionResultError));
     }
@@ -112,13 +145,13 @@ public class GameManager : MonoBehaviour
     {
         ActionBranch branch = branches[index];
         string result = string.IsNullOrEmpty(response.Result) ? "..." : response.Result;
-        allHistory.Add((actionTaken, result));
+        branchHistories[index].Add((actionTaken, result));
         branch.StepsTaken++;
 
         // Only claim a new clue was found if it actually made it into the list -
         // AddClueEntry can silently discard an incomplete/truncated fragment, and the
         // message shouldn't promise something that isn't there.
-        bool clueAdded = response.NewClue != null && AddClueEntry(response.NewClue);
+        bool clueAdded = response.NewClue != null && AddClueEntry(response.NewClue, index);
         outputText.text = result + (clueAdded ? "\n\nNew clue found." : "");
 
         if (branch.IsComplete)
@@ -273,9 +306,14 @@ public class GameManager : MonoBehaviour
         return sb.ToString();
     }
 
-    private string BuildCluesText()
+    // Combines the shared initial clues with just this branch's own discoveries - never
+    // another branch's - so a suspect-focused thread only ever sees evidence relevant to
+    // (or at least previously surfaced by) its own investigation.
+    private string BuildCluesText(int branchIndex)
     {
-        return allClues.Count == 0 ? "None yet." : string.Join("\n", allClues);
+        var combined = new List<string>(initialClues);
+        combined.AddRange(branchClues[branchIndex]);
+        return combined.Count == 0 ? "None yet." : string.Join("\n", combined);
     }
 
     private IEnumerator PopulateCluesWhenReady()
@@ -295,11 +333,13 @@ public class GameManager : MonoBehaviour
         if (!GameSession.HasClues)
             Debug.LogWarning("No clues were available for this story, even after the follow-up fetch.");
 
+        // Null branchIndex: these are shared baseline clues, not tied to any one branch's
+        // own investigation.
         foreach (string clue in GameSession.Clues)
-            AddClueEntry(clue);
+            AddClueEntry(clue, branchIndex: null);
     }
 
-    private bool AddClueEntry(string clueText)
+    private bool AddClueEntry(string clueText, int? branchIndex)
     {
         string formatted = FormatClue(clueText);
         if (formatted == null)
@@ -309,13 +349,17 @@ public class GameManager : MonoBehaviour
         // Despite "Known Clues So Far" being in every action prompt, the model
         // sometimes restates an already-discovered clue verbatim instead of finding
         // something new (weak instruction-following, same root cause as everywhere
-        // else in this project) - skip an exact repeat rather than padding the panel
-        // (and every later turn's "Known Clues So Far" context) with the same fact
-        // twice, and don't let the caller claim "New clue found." for it.
+        // else in this project) - skip an exact repeat (even one found by a different
+        // branch) rather than padding the panel with the same fact twice, and don't let
+        // the caller claim "New clue found." for it.
         if (allClues.Contains(formatted))
             return false;
 
         allClues.Add(formatted);
+        if (branchIndex.HasValue)
+            branchClues[branchIndex.Value].Add(formatted);
+        else
+            initialClues.Add(formatted);
 
         if (clueTemplate == null || cluesGroupParent == null)
             return true;
