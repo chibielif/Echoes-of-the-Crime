@@ -24,9 +24,15 @@ public class LLMStoryClient : MonoBehaviour
         "line starting with the suspect's name.\n" +
         "Important: Under the \"Clues:\" heading, you MUST list at least 3 clues, each as its own numbered line, " +
         "each written as a single complete sentence no more than 200 characters.\n" +
+        "Important: Under the \"Clues:\" heading, make sure AT LEAST ONE clue relates to EACH of the three " +
+        "suspects specifically - every suspect must have something for the detective to investigate, not just " +
+        "the real murderer.\n" +
         "Important: Each of the 3 initial actions must be a single short sentence, no more than 100 characters. " +
         "This limit applies ONLY to those 3 actions - the Crime Summary, Victim, Crime Scene, Suspects, and Clues " +
         "sections must still be written in full as descriptive paragraphs, not shortened.\n" +
+        "Important: The three \"Initial Player Actions\" MUST correspond one-to-one, IN ORDER, with the three " +
+        "suspects listed under \"Suspects:\" above - the first action investigates the first suspect, the second " +
+        "action investigates the second suspect, and the third action investigates the third suspect.\n" +
         "Important: You MUST end your response with \"Initial Player Actions:\" followed by exactly 3 numbered actions.\n" +
         "Important: The \"Real Murderer:\" section MUST include a one-sentence motive (why they did it) and one " +
         "specific piece of decisive proof - never just a name alone. The decisive proof MUST correspond to one of " +
@@ -39,6 +45,9 @@ public class LLMStoryClient : MonoBehaviour
         "You are a detective game designer. Based on this murder mystery story:\n\n" +
         "{0}\n\n" +
         "Provide exactly three logical initial actions that a detective player might take at the start of the investigation. Format them clearly under the heading \"Initial Player Actions:\" as a numbered list.\n" +
+        "Important: The three actions MUST correspond one-to-one, IN ORDER, with the three suspects already " +
+        "listed in the story above - the first action investigates the first suspect, the second investigates " +
+        "the second suspect, and the third investigates the third suspect.\n" +
         "Important: Each action must be a single short sentence, no more than 100 characters.\n\n" +
         "### Response:";
 
@@ -185,47 +194,59 @@ public class LLMStoryClient : MonoBehaviour
     private const string ActionPromptTemplate =
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
-        "SECRET (do NOT reveal to the player): the real murderer is {4}. Every result you write must stay " +
-        "consistent with this fact and must never contradict or give it away.\n\n" +
-        "Known Clues So Far:\n{3}\n\n" +
-        "Previous Player Actions and Results:\n{1}\n\n" +
-        "THE DETECTIVE'S CURRENT ACTION: \"{2}\"\n\n" +
+        "SECRET (do NOT reveal to the player): the real murderer - including their identity, motive, and " +
+        "decisive proof - is: {4}. Stay consistent with ALL of this always.\n\n" +
+        "THIS INVESTIGATION THREAD IS FOCUSED ONLY ON SUSPECT: {5}. The result, any new clue, and the " +
+        "next action must all relate specifically to {5} - do not shift focus to a different suspect. If {5} " +
+        "is NOT the real murderer described above, keep the result and clue neutral or only mildly suspicious " +
+        "- do not make {5} look definitively guilty. Only write strongly incriminating content if {5} truly " +
+        "is the real murderer.\n\n" +
+        "Known Clues So Far (for this thread):\n{3}\n\n" +
+        "Previous Actions and Results (for THIS thread only):\n{1}\n\n" +
+        "THE DETECTIVE'S CURRENT ACTION (about {5}): \"{2}\"\n\n" +
         "Describe the result of ONLY that action, briefly in no more than 2 sentences. Do not describe a " +
         "different action or continue a previous one.\n" +
-        "After generating the result, provide exactly one logical action that a detective player might take after seeing the result. Format the action clearly after the heading \"New Player Action:\".\n" +
-        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
+        "After generating the result, provide exactly one logical action that a detective player might take next to keep investigating {5}. Format the action clearly after the heading \"New Player Action:\".\n" +
+        "Then, clearly reveal if a new clue about {5} is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
         "single sentence (write 'None' if no new clue). Never list more than one clue here.\n" +
         "Do NOT reveal the murderer to the player.\n" +
         "Important: Your result MUST be no more than 300 characters.\n" +
         "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
         "Important: The new action must be a single short sentence, no more than 100 characters.\n" +
+        "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
-        "Now, write the result of this exact action: \"{2}\"\n\n" +
+        "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
     private const string FinalActionPromptTemplate =
         "<s>### Prompt:\n" +
         "You are an intelligent mystery writer. Continue the following murder mystery:{0}\n" +
-        "SECRET (do NOT reveal to the player): the real murderer is {4}. Every result you write must stay " +
-        "consistent with this fact and must never contradict or give it away.\n\n" +
-        "Known Clues So Far:\n{3}\n\n" +
-        "Previous Player Actions and Results:\n{1}\n\n" +
-        "THE DETECTIVE'S CURRENT ACTION: \"{2}\"\n\n" +
+        "SECRET (do NOT reveal to the player): the real murderer - including their identity, motive, and " +
+        "decisive proof - is: {4}. Stay consistent with ALL of this always.\n\n" +
+        "THIS INVESTIGATION THREAD IS FOCUSED ONLY ON SUSPECT: {5}. The result and any new clue must " +
+        "relate specifically to {5} - do not shift focus to a different suspect. If {5} is NOT the real " +
+        "murderer described above, keep the result and clue neutral or only mildly suspicious - do not make " +
+        "{5} look definitively guilty. Only write strongly incriminating content if {5} truly is the real " +
+        "murderer.\n\n" +
+        "Known Clues So Far (for this thread):\n{3}\n\n" +
+        "Previous Actions and Results (for THIS thread only):\n{1}\n\n" +
+        "THE DETECTIVE'S CURRENT ACTION (about {5}): \"{2}\"\n\n" +
         "Describe the result of ONLY that action, briefly in no more than 2 sentences. Do not describe a " +
         "different action or continue a previous one.\n" +
-        "Then, clearly reveal if a new clue is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
+        "Then, clearly reveal if a new clue about {5} is found by writing: \"New clue discovered:\" followed by AT MOST ONE " +
         "single sentence (write 'None' if no new clue). Never list more than one clue here.\n" +
         "Do NOT reveal the murderer to the player.\n" +
         "Important: Your result MUST be no more than 300 characters.\n" +
         "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
+        "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
-        "Now, write the result of this exact action: \"{2}\"\n\n" +
+        "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
     public IEnumerator RequestActionResult(string storyContext, string previousActionsAndResults, string currentAction,
-        bool isFinalStep, string knownClues, string realMurderer, Action<ActionResponse> onSuccess, Action<string> onError)
+        bool isFinalStep, string knownClues, string realMurderer, string suspectName, Action<ActionResponse> onSuccess, Action<string> onError)
     {
         if (config == null || string.IsNullOrEmpty(config.endpointUrl))
         {
@@ -249,8 +270,13 @@ public class LLMStoryClient : MonoBehaviour
             ? "not clearly specified - stay consistent with the story and clues as already written"
             : realMurderer;
 
+        // Likewise for the suspect this branch is bound to, in the rare case fewer than
+        // 3 real suspect names came through at all (GameManager already falls back to
+        // "Suspect N" per-branch, so this is only hit if even that's somehow empty).
+        string suspect = string.IsNullOrWhiteSpace(suspectName) ? "the suspect being investigated" : suspectName;
+
         string template = isFinalStep ? FinalActionPromptTemplate : ActionPromptTemplate;
-        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues, murderer);
+        string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues, murderer, suspect);
 
         yield return SendPrompt(prompt, samplingParams,
             text => onSuccess?.Invoke(StoryParser.ParseActionResponse(text)),

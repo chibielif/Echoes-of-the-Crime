@@ -156,7 +156,7 @@ public static class StoryParser
         result.CrimeScene = TrimTrailingJunk(CombineParts(sectionParts, "CrimeScene"));
         result.Suspects = TrimTrailingJunk(CombineParts(sectionParts, "Suspects"));
         result.Clues = TrimTrailingJunk(CombineParts(sectionParts, "Clues"));
-        result.RealMurderer = TrimTrailingJunk(CombineParts(sectionParts, "RealMurderer"));
+        result.RealMurderer = TrimMurdererHallucination(TrimTrailingJunk(CombineParts(sectionParts, "RealMurderer")));
         result.InitialActions = ExtractNumberedLines(CombineParts(sectionParts, "InitialActions"));
 
         // The model doesn't always emit a "Crime Summary:" header - sometimes none of
@@ -247,7 +247,31 @@ public static class StoryParser
         // leaks into the fallback text and would have shown up verbatim in the
         // guess-the-murderer reveal. Strip it defensively since this follow-up's context
         // makes it safe to assume the label always means the same thing.
-        return Regex.Replace(result, @"^\s*(real\s+murderer|what\s+really\s+happened)\s*[:?]\s*", "", RegexOptions.IgnoreCase).Trim();
+        result = Regex.Replace(result, @"^\s*(real\s+murderer|what\s+really\s+happened)\s*[:?]\s*", "", RegexOptions.IgnoreCase).Trim();
+
+        return TrimMurdererHallucination(result);
+    }
+
+    // A different, subtler hallucination than CutHallucinatedContinuation catches: after
+    // giving the real motive/proof, the model sometimes keeps going by addressing the
+    // player directly - e.g. "What would you like the player to do next?" followed by a
+    // fabricated numbered list of new actions. Confirmed in an actual playthrough; none
+    // of CutHallucinatedContinuation's markers (###, ---, ##) appear in this pattern, so
+    // it survived all the way into the reveal shown to the player. Neither a numbered
+    // list nor a direct address to "the player"/"players" should ever legitimately
+    // appear in this field, so either is treated as a hard stop - cut at the start of
+    // whichever offending line comes first, not just the trigger word, so the fragment
+    // "What would you like the" doesn't survive as trailing junk.
+    private static readonly Regex MurdererHallucinationMarker = new Regex(
+        @"^\s*\d+[.\)]\s|^.*\bplayers?\b.*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+    private static string TrimMurdererHallucination(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return text;
+
+        Match m = MurdererHallucinationMarker.Match(text);
+        return m.Success ? text.Substring(0, m.Index).Trim() : text;
     }
 
     // The model sometimes keeps going past the intended answer, hallucinating further
@@ -275,6 +299,20 @@ public static class StoryParser
         Match endMatch = Regex.Match(raw, @"^\s*#{0,3}\s*end\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
         if (endMatch.Success && endMatch.Index < cutoff)
             cutoff = endMatch.Index;
+
+        // A standalone line made of nothing but repeated separator-like characters
+        // (e.g. "--/--") - confirmed in an actual playthrough: the model tacked one of
+        // these onto the end of an otherwise-complete action, followed by a
+        // self-referential "Your response was successful!" status line. Neither is a
+        // fixed enough string to add to the marker list above, but this shape never
+        // legitimately appears in a real action/clue/result either way. This also
+        // mattered beyond just trailing junk: the divider defeated the sentence-boundary
+        // regex used elsewhere (a "." followed by "\n--/--" isn't followed by
+        // whitespace+capital or end-of-string), so without this cutoff the *entire*
+        // hallucinated tail used to survive as if it were part of the real action.
+        Match dividerMatch = Regex.Match(raw, @"^\s*[-=~*/_]{2,}\s*$", RegexOptions.Multiline);
+        if (dividerMatch.Success && dividerMatch.Index < cutoff)
+            cutoff = dividerMatch.Index;
 
         return raw.Substring(0, cutoff).Trim();
     }
@@ -328,7 +366,16 @@ public static class StoryParser
             // through as one crammed clue. Take just the first item here, same as NewAction.
             List<string> clueItems = ExtractListItems(clueBlock);
             string clueText = clueItems.Count > 0 ? clueItems[0] : clueBlock;
-            if (!IsNoClue(clueText))
+
+            // Check IsNoClue against the FIRST SENTENCE specifically, not the whole
+            // (possibly multi-sentence) clueText - confirmed in an actual playthrough: the
+            // model sometimes answers "None." as a complete first sentence, then keeps
+            // rambling with unrelated commentary afterward ("None. The result stands as
+            // described above."). That full blob doesn't equal "None" exactly, so it used
+            // to pass this check - but GameManager.TruncateClue downstream still cuts to
+            // just the first sentence for display, isolating "None." and showing it as if
+            // it were a real clue. Checking the first sentence here catches it up front.
+            if (!IsNoClue(TruncateToFirstSentence(clueText)))
                 result.NewClue = clueText;
         }
 
@@ -448,19 +495,84 @@ public static class StoryParser
     // text on the guess-screen buttons.
     private static readonly Regex CapitalizedNameRun = new Regex(@"^([A-Z][a-zA-Z'\-]*(?:\s+[A-Z][a-zA-Z'\-]*)*)");
 
+    // A title followed by a capitalized word/two, anywhere in the line - e.g. "Officer
+    // Marcus", "Mr. Traven". Deliberately searched across the whole line, not just the
+    // start, since the model sometimes leads a suspect line with an evidentiary clause
+    // ("The coin was found near Brennan's hand, suggesting Officer Marcus was
+    // involved...") rather than the suspect's name.
+    private static readonly Regex TitledNameAnywhere = new Regex(
+        @"\b(?:Mr|Mrs|Ms|Miss|Dr|Officer|Detective|Sergeant|Sgt|Captain|Capt|Professor|Prof)\.?\s+[A-Z][a-zA-Z'\-]*(?:\s+[A-Z][a-zA-Z'\-]*)?");
+
+    // Ordinary sentence-initial capitalized words ("The", "When", "After", etc.) that
+    // look like a name to a naive capitalized-word check but never actually are one.
+    private static readonly HashSet<string> NonNameWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "The", "A", "An", "This", "That", "These", "Those", "When", "After", "Before",
+        "During", "While", "Since", "If", "However", "Meanwhile", "Later", "Then",
+    };
+
+    // A real name is a short run of capitalized words with no lowercase filler words
+    // mixed in - used to reject a pre-comma segment that's actually a full descriptive
+    // clause rather than a name (see ExtractName).
+    private static bool LooksLikeName(string candidate)
+    {
+        if (string.IsNullOrEmpty(candidate) || candidate.Length > 40)
+            return false;
+
+        string[] words = candidate.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0)
+            return false;
+
+        foreach (string word in words)
+            if (!char.IsUpper(word[0]))
+                return false;
+
+        return true;
+    }
+
     private static string ExtractName(string suspectLine)
     {
         Match bold = Regex.Match(suspectLine, @"\*\*(.+?)\*\*");
         if (bold.Success)
             return bold.Groups[1].Value.Trim();
 
+        // The standard "Name, description" case - but only trust the pre-comma segment
+        // if it actually looks like a name. Confirmed in an actual playthrough: the model
+        // sometimes leads with an evidentiary clause instead ("The coin was found near
+        // Brennan's hand, suggesting Officer Marcus..."), and blindly taking everything
+        // before the first comma used to return that whole clause as the "name," which
+        // then displayed as a garbled sentence on the guess-screen buttons.
         int commaIndex = suspectLine.IndexOf(',');
         if (commaIndex >= 0)
-            return suspectLine.Substring(0, commaIndex).Trim();
+        {
+            string beforeComma = suspectLine.Substring(0, commaIndex).Trim();
+            if (LooksLikeName(beforeComma))
+                return beforeComma;
+        }
 
         Match capsRun = CapitalizedNameRun.Match(suspectLine);
         if (capsRun.Success)
-            return capsRun.Groups[1].Value.Trim();
+        {
+            string candidate = capsRun.Groups[1].Value.Trim();
+            // A single common sentence-starter ("The coin...") isn't a name - fall
+            // through to the next tier instead of returning it.
+            if (!(candidate.IndexOf(' ') < 0 && NonNameWords.Contains(candidate)))
+                return candidate;
+        }
+
+        Match titled = TitledNameAnywhere.Match(suspectLine);
+        if (titled.Success)
+            return titled.Value.Trim();
+
+        // Last resort: the first standalone capitalized word past the very start of the
+        // line that isn't a common sentence-starter - a weaker signal than a title, but
+        // still better than showing the entire garbled sentence as a "name."
+        foreach (Match word in Regex.Matches(suspectLine, @"\b[A-Z][a-z']+\b"))
+        {
+            if (word.Index == 0 || NonNameWords.Contains(word.Value))
+                continue;
+            return word.Value;
+        }
 
         return suspectLine.Trim();
     }
