@@ -68,6 +68,20 @@ public class LoadingController : MonoBehaviour
     private void OnActionsSuccess(string[] actions)
     {
         GameSession.SetInitialActions(actions);
+
+        // A successful HTTP response doesn't guarantee the model actually produced 3
+        // usable actions (Rule #1: never trust it to follow instructions) - confirmed in
+        // an actual playthrough: the Continue button stayed permanently disabled with no
+        // error and no further retry, since the retry path below only ever triggered on
+        // an actual network/RunPod failure, never on a "successful" response that still
+        // didn't parse into 3 valid actions. Treat that case the same as a transport
+        // error instead of silently calling the fetch finished.
+        if (!GameSession.HasInitialActions)
+        {
+            OnActionsError("Response did not contain 3 usable actions.");
+            return;
+        }
+
         FinishBackgroundFetch();
     }
 

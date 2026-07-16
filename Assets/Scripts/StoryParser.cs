@@ -28,13 +28,26 @@ public static class StoryParser
     // where real content is allowed to continue right after the colon on the same line
     // (e.g. "**Victim:** Ellyn Harnett..."); OR a bare, unmarked line, which must occupy
     // the line by itself with nothing trailing; OR the one confirmed non-colon paraphrase
-    // ("What really happened?"), also required to stand alone. See Parse() for why an
-    // unmarked/unrecognized heading additionally needs to be standalone before it's
-    // trusted as a real boundary - this regex only finds candidates.
+    // ("What really happened?"), also required to stand alone; OR a pure markdown header
+    // with no colon at all (e.g. "#### Crime Summary" on its own line, nothing else) -
+    // confirmed in an actual playthrough: the model sometimes formats every section as a
+    // bare "####"-prefixed heading with no trailing colon anywhere, which used to fail
+    // every alternative here (all of them required a colon), so not one of the 6 real
+    // section headers was recognized - only "Initial Player Actions:" survived, purely
+    // because that one specific header happened to still have a colon. Every other
+    // section's content silently fell into Title (never displayed) instead of its own
+    // field. Since this alternative has no colon to mark where the heading text ends, it
+    // additionally requires standalone-ness itself (nothing trailing after the closing
+    // #'s), same as the bare-line alternative above - a "####" line always safely acts as
+    // a boundary-only marker (StripMarkers deletes any "#"-prefixed line's content
+    // wholesale anyway), so this can't be mistaken for real body text.
+    // See Parse() for why an unmarked/unrecognized heading additionally needs to be
+    // standalone before it's trusted as a real boundary - this regex only finds candidates.
     private static readonly Regex CandidateHeadingLine = new Regex(
         @"^[ \t]*(?:#{1,6}[ \t]*\**|\*\*)([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)\**[ \t]*:" +
         @"|^[ \t]*([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)[ \t]*:[ \t]*$" +
-        @"|^[ \t]*(what\s+really\s+happened)\s*\??[ \t]*$",
+        @"|^[ \t]*(what\s+really\s+happened)\s*\??[ \t]*$" +
+        @"|^[ \t]*#{1,6}[ \t]*\**([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)\**[ \t]*$",
         RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
     // Which known field a detected heading's text belongs to, checked by keyword rather
@@ -65,13 +78,15 @@ public static class StoryParser
         return null;
     }
 
-    // CandidateHeadingLine has three alternatives (marked-up, bare-standalone, and the
-    // "what really happened" paraphrase), which land in different capture groups.
+    // CandidateHeadingLine has four alternatives (marked-up-with-colon, bare-standalone-
+    // with-colon, the "what really happened" paraphrase, and bare markdown-header-with-
+    // no-colon), which land in different capture groups.
     private static string GetHeadingText(Match headingLine)
     {
         if (headingLine.Groups[1].Success) return headingLine.Groups[1].Value;
         if (headingLine.Groups[2].Success) return headingLine.Groups[2].Value;
-        return headingLine.Groups[3].Value;
+        if (headingLine.Groups[3].Success) return headingLine.Groups[3].Value;
+        return headingLine.Groups[4].Value;
     }
 
     // Whether nothing but whitespace/asterisks follows a position through to the end of
@@ -156,7 +171,7 @@ public static class StoryParser
         result.CrimeScene = TrimTrailingJunk(CombineParts(sectionParts, "CrimeScene"));
         result.Suspects = TrimTrailingJunk(CombineParts(sectionParts, "Suspects"));
         result.Clues = TrimTrailingJunk(CombineParts(sectionParts, "Clues"));
-        result.RealMurderer = TrimMurdererHallucination(TrimTrailingJunk(CombineParts(sectionParts, "RealMurderer")));
+        result.RealMurderer = TrimHallucinatedMenu(TrimTrailingJunk(CombineParts(sectionParts, "RealMurderer")));
         result.InitialActions = ExtractNumberedLines(CombineParts(sectionParts, "InitialActions"));
 
         // The model doesn't always emit a "Crime Summary:" header - sometimes none of
@@ -210,6 +225,42 @@ public static class StoryParser
         return ExtractNumberedLines(content);
     }
 
+    // For the standalone Suspects/Clues follow-up responses (LLMStoryClient.RequestSuspects/
+    // RequestClues) - these used to call ExtractSuspectNames/ExtractClueList directly on the
+    // FULL raw response, heading included, unlike ParseInitialActions above which already
+    // slices past its own "Initial Player Actions:" heading first. Confirmed in an actual
+    // playthrough: when the model answers in paragraph form (no numbered/bulleted list),
+    // ExtractSuspectEntries' paragraph-fallback treats the response's own leading
+    // "Suspects:" line as if it were the first suspect's own paragraph - nothing in that
+    // fallback path knows to skip a heading, since Parse() normally strips that boundary
+    // out structurally before either extractor ever sees the text. That leaked the literal
+    // word "Suspects" into GameSession.SuspectNames, which then displayed as a bare,
+    // meaningless guess-screen button in place of a real suspect. Slicing past the heading
+    // here - falling back to the whole response if the model skipped the heading entirely,
+    // same as ParseRealMurderer already does - fixes it at the source instead of teaching
+    // every extractor tier to recognize a heading it was never supposed to see.
+    public static List<string> ParseSuspectsFollowUp(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new List<string>();
+
+        raw = raw.Replace("\r\n", "\n").Trim();
+        Match m = Regex.Match(raw, @"suspects\s*:", RegexOptions.IgnoreCase);
+        string content = m.Success ? raw.Substring(m.Index + m.Length) : raw;
+        return ExtractSuspectNames(content);
+    }
+
+    public static List<string> ParseCluesFollowUp(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return new List<string>();
+
+        raw = raw.Replace("\r\n", "\n").Trim();
+        Match m = Regex.Match(raw, @"clues\s*:", RegexOptions.IgnoreCase);
+        string content = m.Success ? raw.Substring(m.Index + m.Length) : raw;
+        return ExtractClueList(content);
+    }
+
     // For the standalone Real Murderer follow-up response (a narrow, single-purpose
     // request, unlike the full story). Reuses Parse() so the same heading-paraphrase
     // handling ("What really happened?") applies here too, rather than duplicating it.
@@ -249,35 +300,104 @@ public static class StoryParser
         // makes it safe to assume the label always means the same thing.
         result = Regex.Replace(result, @"^\s*(real\s+murderer|what\s+really\s+happened)\s*[:?]\s*", "", RegexOptions.IgnoreCase).Trim();
 
-        return TrimMurdererHallucination(result);
+        return TrimHallucinatedMenu(result);
     }
 
-    // A different, subtler hallucination than CutHallucinatedContinuation catches: after
-    // giving the real motive/proof, the model sometimes keeps going by addressing the
-    // player directly - e.g. "What would you like the player to do next?" followed by a
-    // fabricated numbered list of new actions. Confirmed in an actual playthrough; none
-    // of CutHallucinatedContinuation's markers (###, ---, ##) appear in this pattern, so
-    // it survived all the way into the reveal shown to the player. Neither a numbered
-    // list nor a direct address to "the player"/"players" should ever legitimately
-    // appear in this field, so either is treated as a hard stop - cut at the start of
-    // whichever offending line comes first, not just the trigger word, so the fragment
-    // "What would you like the" doesn't survive as trailing junk.
-    private static readonly Regex MurdererHallucinationMarker = new Regex(
-        @"^\s*\d+[.\)]\s|^.*\bplayers?\b.*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+    // A different, subtler hallucination than CutHallucinatedContinuation catches: the
+    // model sometimes stops narrating and starts either addressing the player directly
+    // ("What would you like the player to do next?", "What would you like to do now?")
+    // or listing out speculative bullet points / a menu of possible next actions instead
+    // of finishing the narrative it was asked for. Confirmed in an actual playthrough for
+    // both fields this guards: the Real Murderer follow-up (a direct player-address
+    // followed by a fabricated numbered list of new actions), and the per-turn Result
+    // field ("Based on these findings:" plus its own speculative bulleted list, then
+    // "What would you like to do now?" plus a numbered menu that competes with the single
+    // next action this game already generates for the button). None of
+    // CutHallucinatedContinuation's markers (###, ---, ##) appear in either case, so it
+    // used to survive all the way into what's shown to the player. Neither a numbered nor
+    // bulleted list, nor a direct address to "the player"/"players", should ever
+    // legitimately appear in either field, so any of these is treated as a hard stop -
+    // cut at the start of whichever offending line comes first, not just the trigger
+    // word, so a fragment like "What would you like the" doesn't survive as trailing
+    // junk.
+    private static readonly Regex HallucinatedMenuMarker = new Regex(
+        @"^\s*(?:\d+[.\)]|[-*•])\s|^.*\bplayers?\b.*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
-    private static string TrimMurdererHallucination(string text)
+    private static string TrimHallucinatedMenu(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
             return text;
 
-        Match m = MurdererHallucinationMarker.Match(text);
+        Match m = HallucinatedMenuMarker.Match(text);
         return m.Success ? text.Substring(0, m.Index).Trim() : text;
+    }
+
+    // Shared with ParseActionResponse (and with FindFakeHeaderCutoff just below) so the
+    // "what counts as this response's own action/clue header" definition can't drift out
+    // of sync between the two places that need to recognize it.
+    private const string ActionHeaderPattern = @"(?:new(?:\s+player['’]?s?)?|next(?:\s+player['’]?s?)?)\s+action\s*:";
+    private const string ClueHeaderPattern = @"new\s+clue[^:.?\n]*[:.?]";
+
+    // A header phrase must start its own line - optionally with markdown "#"/"*" noise
+    // in front, same leniency as CandidateHeadingLine elsewhere in this file - but
+    // nothing else before it. Used to stop ParseActionResponse's action/clue search from
+    // locking onto a hallucinated mid-sentence mention of the phrase instead of the real,
+    // standalone header (see the comment at the actionMatch/clueMatch call sites below).
+    private const string HeaderLinePrefix = @"^[ \t]*#{0,6}[ \t]*\**[ \t]*";
+
+    // A "##"/"###"-prefixed line is a strong sign of hallucinated continuation in a full
+    // story response too - but there it's expected (real section headers), which is why
+    // this cutoff was deliberately never applied to Parse(). For this narrow, per-turn
+    // response, "##"/"###" was assumed to have no legitimate use at all - confirmed in an
+    // actual playthrough that assumption doesn't hold: the model markdown-styles its OWN
+    // required "New Player Action:"/"New Clue Discovered:" headers with a "###" prefix
+    // too (the prompt only asks for the bare phrase, no particular styling - Rule #1, the
+    // model drifts on formatting regardless of what's asked). A blind "\n##" marker
+    // mistook the model's own genuine "### New Player Action:" header for a hallucination
+    // boundary and cut everything from there on - discarding the real action, the real
+    // clue that followed it, and even the real "### End" marker, all of which were still
+    // perfectly legitimate. Only treat a "#"-prefixed line as a real hallucination
+    // boundary if it ISN'T one of the headers this response is actually supposed to
+    // contain.
+    private static readonly Regex FakeHeaderLine = new Regex(@"\n(#{2,})[ \t]*\**[ \t]*", RegexOptions.Multiline);
+
+    private static int FindFakeHeaderCutoff(string raw)
+    {
+        foreach (Match m in FakeHeaderLine.Matches(raw))
+        {
+            int headingStart = m.Index + m.Length;
+            int lineEnd = raw.IndexOf('\n', headingStart);
+            if (lineEnd < 0) lineEnd = raw.Length;
+            string headingLine = raw.Substring(headingStart, lineEnd - headingStart);
+
+            bool isLegitimate =
+                Regex.IsMatch(headingLine, "^" + ActionHeaderPattern, RegexOptions.IgnoreCase)
+                || Regex.IsMatch(headingLine, "^" + ClueHeaderPattern, RegexOptions.IgnoreCase)
+                || Regex.IsMatch(headingLine, @"^end\s*$", RegexOptions.IgnoreCase);
+
+            if (!isLegitimate)
+                return m.Index;
+        }
+        return -1;
+    }
+
+    // The position of the LAST legitimate action/clue header anywhere in the raw text -
+    // used so an "### End" marker that appears before either of these still-needed
+    // headers isn't mistaken for the genuine stop (see CutHallucinatedContinuation).
+    private static int LastLegitimateHeaderIndex(string raw)
+    {
+        int lastIndex = -1;
+        foreach (Match m in Regex.Matches(raw, HeaderLinePrefix + ActionHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline))
+            lastIndex = Math.Max(lastIndex, m.Index);
+        foreach (Match m in Regex.Matches(raw, HeaderLinePrefix + ClueHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline))
+            lastIndex = Math.Max(lastIndex, m.Index);
+        return lastIndex;
     }
 
     // The model sometimes keeps going past the intended answer, hallucinating further
     // content instead of stopping - a "---" divider, restated conversation markers
-    // ("### Response:"/"### Prompt:"), a "##"-style heading, or a bare "End" line (not
-    // always the literal "### End"). None of these should ever legitimately appear
+    // ("### Response:"/"### Prompt:"), a fake "##"-style heading, or a bare "End" line
+    // (not always the literal "### End"). None of these should ever legitimately appear
     // inside a short, single-purpose answer, so treat the earliest one found as a hard
     // stop. Deliberately NOT used by the general-purpose Parse() - a full story response
     // legitimately uses "##"/"###" as real section headers, so this blanket cutoff would
@@ -287,35 +407,85 @@ public static class StoryParser
     private static string CutHallucinatedContinuation(string raw)
     {
         int cutoff = raw.Length;
-        foreach (string marker in new[] { "### Response:", "### Prompt:", "\n---", "\n##" })
+
+        // These two are extremely specific, unambiguous signs of the model restarting a
+        // fake multi-turn conversation - no genuine single-purpose response would ever
+        // contain either, so they're trusted unconditionally, unlike the markers below.
+        foreach (string marker in new[] { "### Response:", "### Prompt:" })
         {
             int idx = raw.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
             if (idx >= 0 && idx < cutoff)
                 cutoff = idx;
         }
 
-        // Only match a *standalone* "End" line (not "end" appearing mid-sentence in
-        // normal prose) to avoid false positives.
-        Match endMatch = Regex.Match(raw, @"^\s*#{0,3}\s*end\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-        if (endMatch.Success && endMatch.Index < cutoff)
-            cutoff = endMatch.Index;
+        int fakeHeaderCutoff = FindFakeHeaderCutoff(raw);
+        if (fakeHeaderCutoff >= 0 && fakeHeaderCutoff < cutoff)
+            cutoff = fakeHeaderCutoff;
+
+        // Neither an "End" line nor a separator divider (below) is ever itself a
+        // legitimate header - unlike FindFakeHeaderCutoff's "###" lines, there's no
+        // "this IS one of our own headers" check possible for either. Instead, both are
+        // guarded the same way: don't trust the FIRST occurrence blindly if real content
+        // the parser still needs (an action/clue header) comes after it. Confirmed in an
+        // actual playthrough for "End": the model wrote "### End" right after the
+        // Result, before ever reaching "New Player Action:"/"New clue discovered:", then
+        // kept going with a hallucinated restatement of its own instructions that
+        // nonetheless contained the real action and clue afterward. Cutting at that
+        // first, premature "End" discarded the real action and clue entirely - the "no
+        // usable New Player Action" warning fired even though the raw response clearly
+        // had one, just past where parsing had already stopped looking.
+        int lastNeededHeaderIndex = LastLegitimateHeaderIndex(raw);
+        foreach (Match endMatch in Regex.Matches(raw, @"^\s*#{0,3}\s*end\s*$", RegexOptions.IgnoreCase | RegexOptions.Multiline))
+        {
+            if (endMatch.Index < lastNeededHeaderIndex)
+                continue;
+            if (endMatch.Index < cutoff)
+                cutoff = endMatch.Index;
+            break;
+        }
 
         // A standalone line made of nothing but repeated separator-like characters
-        // (e.g. "--/--") - confirmed in an actual playthrough: the model tacked one of
-        // these onto the end of an otherwise-complete action, followed by a
-        // self-referential "Your response was successful!" status line. Neither is a
-        // fixed enough string to add to the marker list above, but this shape never
-        // legitimately appears in a real action/clue/result either way. This also
-        // mattered beyond just trailing junk: the divider defeated the sentence-boundary
-        // regex used elsewhere (a "." followed by "\n--/--" isn't followed by
-        // whitespace+capital or end-of-string), so without this cutoff the *entire*
-        // hallucinated tail used to survive as if it were part of the real action.
-        Match dividerMatch = Regex.Match(raw, @"^\s*[-=~*/_]{2,}\s*$", RegexOptions.Multiline);
-        if (dividerMatch.Success && dividerMatch.Index < cutoff)
-            cutoff = dividerMatch.Index;
+        // (e.g. "---", "--/--"). Confirmed in an actual playthrough for the "tacked onto
+        // the end of an otherwise-complete action, followed by a self-referential 'Your
+        // response was successful!' status line" case this was originally added for -
+        // but ALSO confirmed, separately, that the model sometimes inserts a bare "---"
+        // as an innocuous stylistic paragraph break between the Result and its own
+        // genuine "New Player Action:"/"New clue discovered:" sections, not as a sign of
+        // hallucination at all. Blindly trusting the first one discarded that real
+        // action and clue entirely, the same failure shape as the premature-"End" case
+        // above - so this gets the identical guard: skip any divider before the last
+        // real header still coming up, only trust one at or after that point.
+        foreach (Match dividerMatch in Regex.Matches(raw, @"^\s*[-=~*/_]{2,}\s*$", RegexOptions.Multiline))
+        {
+            if (dividerMatch.Index < lastNeededHeaderIndex)
+                continue;
+            if (dividerMatch.Index < cutoff)
+                cutoff = dividerMatch.Index;
+            break;
+        }
 
         return raw.Substring(0, cutoff).Trim();
     }
+
+    // Confirmed in an actual playthrough: a per-turn response can hand back a
+    // non-empty, non-blank NewAction that's still garbage - the model echoed a
+    // paraphrase of its OWN prompt instructions instead of writing a real action, e.g.
+    // '") and reveal a new clue about Mr. Vincent Reeves (if found) by writing "New clue
+    // discovered:")."' - meta-commentary about the response format itself, landing in
+    // the field a genuine detective action was supposed to occupy. Nothing in
+    // CutHallucinatedContinuation catches this (it isn't a runaway continuation past a
+    // real answer - the "answer" itself just IS this echo), and the empty-NewAction
+    // check in LLMStoryClient can't catch it either, since the field isn't empty.
+    // These specific phrases are drawn directly from our own prompt templates' meta-
+    // instructions (the literal heading text, or the sentence that tells the model how
+    // to use it) - genuine narrative action/result/clue content has no legitimate reason
+    // to contain any of them, so a match here is a strong, checkable signal of this
+    // exact failure mode. Diagnostic only (used by LLMStoryClient to decide whether to
+    // log the raw response) - deliberately not used to silently discard/clamp the text,
+    // since we don't yet have enough confirmed raw responses to know the right fallback.
+    public static readonly Regex EchoedInstructionMarker = new Regex(
+        @"new\s+(?:player'?s?\s+)?action\s*:|new\s+clue\s+discovered|decisive\s+proof|\bby\s+writing\b",
+        RegexOptions.IgnoreCase);
 
     public static ActionResponse ParseActionResponse(string raw)
     {
@@ -325,18 +495,36 @@ public static class StoryParser
 
         raw = CutHallucinatedContinuation(raw.Replace("\r\n", "\n").Trim());
 
-        Match actionMatch = Regex.Match(raw, @"new\s+player\s+action\s*:", RegexOptions.IgnoreCase);
+        // Confirmed in an actual playthrough: two of three branches fell back to the
+        // generic "Investigate further." placeholder text (GameManager's FallbackNewAction)
+        // after their first turn - the only way that happens is NewAction coming back
+        // null, i.e. this heading not being found at all. The model varies this wording
+        // ("New Action:", "Next Action:", "New Player's Action:") the same way it already
+        // varies the "New clue discovered:" heading - match any of those instead of the
+        // single rigid phrase.
+        //
+        // Both header searches require the phrase to start its own line (HeaderLinePrefix
+        // allows optional leading "#"/"*" markdown, same as elsewhere in this file, but
+        // nothing else before it). Confirmed in an actual playthrough this matters: the
+        // model can hallucinate a restated, paraphrased copy of its own instructions
+        // BEFORE the real header ("Now, provide a new clue about Ethan Vale, only if you
+        // have one...") which itself contains the literal phrase "new clue" mid-sentence -
+        // without line-anchoring, Regex.Match's first-occurrence behavior locked onto that
+        // hallucinated mention instead of the real "### New clue discovered:" header
+        // further down, and everything from the fake match onward (including the genuine
+        // header and its real content) got folded into a garbled NewClue.
+        Match actionMatch = Regex.Match(raw, HeaderLinePrefix + ActionHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
         // The model's phrasing for this header varies ("New clue discovered:", "New Clue
         // Found:", "New Clue Discovered?", bare "New Clue:", etc.) - match "new clue"
         // followed by anything up to whichever terminator it used (colon, period, or
         // question mark) rather than chasing each exact wording.
-        Match clueMatch = Regex.Match(raw, @"new\s+clue[^:.?\n]*[:.?]", RegexOptions.IgnoreCase);
+        Match clueMatch = Regex.Match(raw, HeaderLinePrefix + ClueHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
         int resultEnd = raw.Length;
         if (actionMatch.Success) resultEnd = Math.Min(resultEnd, actionMatch.Index);
         if (clueMatch.Success) resultEnd = Math.Min(resultEnd, clueMatch.Index);
-        result.Result = TruncateResult(StripMarkers(raw.Substring(0, resultEnd)));
+        result.Result = TruncateResult(StripMarkers(TrimHallucinatedMenu(raw.Substring(0, resultEnd))));
 
         if (actionMatch.Success)
         {
@@ -511,6 +699,22 @@ public static class StoryParser
         "During", "While", "Since", "If", "However", "Meanwhile", "Later", "Then",
     };
 
+    // A bare title abbreviation with nothing else - what CapitalizedNameRun wrongly
+    // returns on its own when a suspect line leads with an abbreviated title, e.g. "Ms.
+    // Ruth Pearson is a regular customer..." - the period right after "Ms" isn't in
+    // CapitalizedNameRun's allowed character class, so its capitalized-word-run stops
+    // dead at "Ms" instead of continuing on to "Ruth Pearson" just past the period.
+    // Confirmed via direct testing against real suspect text from an actual playthrough:
+    // this silently produced "Ms"/"Mr" alone as a suspect's "name" (shown as a bare,
+    // meaningless guess-screen button) whenever the line had no usable comma-led name
+    // either (the paragraph-fallback path in ExtractSuspectEntries, which leads with
+    // plain prose rather than "Name, description"). Titles with no trailing period
+    // ("Miss", "Officer") aren't affected - only abbreviated ones are.
+    private static readonly HashSet<string> TitleAbbreviations = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Mr", "Mrs", "Ms", "Miss", "Dr", "Prof", "Sgt", "Capt", "Lt", "Col", "Gen", "Rev", "Fr", "St", "Jr", "Sr",
+    };
+
     // A real name is a short run of capitalized words with no lowercase filler words
     // mixed in - used to reject a pre-comma segment that's actually a full descriptive
     // clause rather than a name (see ExtractName).
@@ -554,9 +758,12 @@ public static class StoryParser
         if (capsRun.Success)
         {
             string candidate = capsRun.Groups[1].Value.Trim();
-            // A single common sentence-starter ("The coin...") isn't a name - fall
-            // through to the next tier instead of returning it.
-            if (!(candidate.IndexOf(' ') < 0 && NonNameWords.Contains(candidate)))
+            bool isSingleWord = candidate.IndexOf(' ') < 0;
+            // A single common sentence-starter ("The coin...") isn't a name, and neither
+            // is a bare title abbreviation truncated at its own period ("Ms", "Mr") -
+            // fall through to the next tier (TitledNameAnywhere) instead of returning
+            // either, since that tier can actually see past the period to the real name.
+            if (!(isSingleWord && (NonNameWords.Contains(candidate) || TitleAbbreviations.Contains(candidate))))
                 return candidate;
         }
 
@@ -674,20 +881,30 @@ public static class StoryParser
             || normalized.Equals("N/A", StringComparison.OrdinalIgnoreCase);
     }
 
-    private const int MaxResultLength = 350;
+    // Raised 350 -> 450 -> 1200 across two playthroughs. First raise: a legitimate
+    // multi-sentence result ("...The turn-down had a post-it note attached that said:
+    // 'See Miss Janine tomorrow.'") got clamped off before that last sentence, silently
+    // dropping information the player needed. Second raise: confirmed the model is
+    // consistently capable of much richer, multi-paragraph results than either limit
+    // allowed, and the Game scene's output area is no longer a fixed-height single-line
+    // display (see StoryDisplay-style ScrollRect added to GameManager) - so this no
+    // longer needs to double as a UI-space constraint, only a sanity backstop against
+    // truly runaway generation. The real guard against hallucinated tails (a fabricated
+    // "Based on these findings:" bullet list, or the model offering the player its own
+    // "What would you like to do now?" menu) is TrimHallucinatedMenu above, applied
+    // before this length clamp ever gets a chance to run.
+    private const int MaxResultLength = 1200;
 
     private static string TruncateResult(string result)
     {
-        if (result.Length <= MaxResultLength)
-            return result;
-
-        // The model is asked to stay under 300 characters, but that's a request, not
-        // a guarantee - clamp hard so a rambling response can't break the UI. Prefer
-        // cutting at the last complete sentence within the limit (Result is allowed up
-        // to 2 sentences, unlike actions/clues) so it doesn't trail off mid-word - using
-        // the same abbreviation-aware boundary check so a title like "Mr."/"Mrs." isn't
-        // mistaken for the sentence end.
-        string truncated = result.Substring(0, MaxResultLength);
+        // Cut at the LAST complete sentence within the length limit, not just when the
+        // text exceeds it - using the same abbreviation-aware boundary check so a title
+        // like "Mr."/"Mrs." isn't mistaken for the sentence end. A genuine short result
+        // already ends on a real sentence, so this changes nothing for the normal case -
+        // but it also cleans up the dangling non-sentence fragment TrimHallucinatedMenu
+        // can leave behind right where it cut (e.g. a heading like "Based on these
+        // findings:" with nothing after it, once the bulleted list following it is gone).
+        string truncated = result.Length <= MaxResultLength ? result : result.Substring(0, MaxResultLength);
 
         MatchCollection sentenceEnds = SentenceEndRegex.Matches(truncated);
         if (sentenceEnds.Count > 0)
@@ -695,6 +912,12 @@ public static class StoryParser
             Match last = sentenceEnds[sentenceEnds.Count - 1];
             return truncated.Substring(0, last.Index + last.Length).Trim();
         }
+
+        // No sentence-ending punctuation found at all - if it's still within budget,
+        // there's nothing to gain by chopping mid-word, so return it as-is. Only past
+        // the length cap do we force a hard, ellipsis-marked cut.
+        if (result.Length <= MaxResultLength)
+            return truncated;
 
         int lastSpace = truncated.LastIndexOf(' ');
         if (lastSpace > 0)
