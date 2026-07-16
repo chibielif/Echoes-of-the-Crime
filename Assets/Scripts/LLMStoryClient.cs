@@ -34,6 +34,8 @@ public class LLMStoryClient : MonoBehaviour
         "suspects listed under \"Suspects:\" above - the first action investigates the first suspect, the second " +
         "action investigates the second suspect, and the third action investigates the third suspect.\n" +
         "Important: You MUST end your response with \"Initial Player Actions:\" followed by exactly 3 numbered actions.\n" +
+        "Important: Never invent a personal name for the detective/player character anywhere in this story - " +
+        "always refer to them as \"you\".\n" +
         "Important: The \"Real Murderer:\" section MUST include a one-sentence motive (why they did it) and one " +
         "specific piece of decisive proof - never just a name alone. The decisive proof MUST correspond to one of " +
         "the clues you already listed under \"Clues:\" above - do not invent a new piece of evidence the player " +
@@ -48,7 +50,8 @@ public class LLMStoryClient : MonoBehaviour
         "Important: The three actions MUST correspond one-to-one, IN ORDER, with the three suspects already " +
         "listed in the story above - the first action investigates the first suspect, the second investigates " +
         "the second suspect, and the third investigates the third suspect.\n" +
-        "Important: Each action must be a single short sentence, no more than 100 characters.\n\n" +
+        "Important: Each action must be a single short sentence, no more than 100 characters.\n" +
+        "Important: Refer to the detective/player as \"you\" - never invent a personal name for them.\n\n" +
         "### Response:";
 
     public IEnumerator RequestStory(Action<string> onSuccess, Action<string> onError)
@@ -120,7 +123,7 @@ public class LLMStoryClient : MonoBehaviour
         string prompt = string.Format(SuspectsFollowUpPromptTemplate, fullStory);
 
         yield return SendPrompt(prompt, samplingParams,
-            text => onSuccess?.Invoke(StoryParser.ExtractSuspectNames(text)),
+            text => onSuccess?.Invoke(StoryParser.ParseSuspectsFollowUp(text)),
             onError);
     }
 
@@ -150,7 +153,7 @@ public class LLMStoryClient : MonoBehaviour
         string prompt = string.Format(CluesFollowUpPromptTemplate, fullStory);
 
         yield return SendPrompt(prompt, samplingParams,
-            text => onSuccess?.Invoke(StoryParser.ExtractClueList(text)),
+            text => onSuccess?.Invoke(StoryParser.ParseCluesFollowUp(text)),
             onError);
     }
 
@@ -214,8 +217,11 @@ public class LLMStoryClient : MonoBehaviour
         "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
         "Important: The new action must be a single short sentence, no more than 100 characters.\n" +
         "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
+        "Important: Refer to the detective performing this investigation as \"you\" - never invent a personal " +
+        "name for them (e.g. never \"Detective Mark\" or similar).\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
+        "Reminder: refer to the detective as \"you\", never by an invented name.\n" +
         "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
@@ -240,8 +246,11 @@ public class LLMStoryClient : MonoBehaviour
         "Important: Your result MUST be no more than 300 characters.\n" +
         "Important: If a new clue is found, it must be exactly ONE single complete sentence, no more than 200 characters.\n" +
         "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
+        "Important: Refer to the detective performing this investigation as \"you\" - never invent a personal " +
+        "name for them (e.g. never \"Detective Mark\" or similar).\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
+        "Reminder: refer to the detective as \"you\", never by an invented name.\n" +
         "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
@@ -279,7 +288,33 @@ public class LLMStoryClient : MonoBehaviour
         string prompt = string.Format(template, storyContext, previousActionsAndResults, currentAction, knownClues, murderer, suspect);
 
         yield return SendPrompt(prompt, samplingParams,
-            text => onSuccess?.Invoke(StoryParser.ParseActionResponse(text)),
+            text =>
+            {
+                ActionResponse parsed = StoryParser.ParseActionResponse(text);
+
+                // Confirmed in an actual playthrough: GameManager's generic "Investigate
+                // further." fallback showed up in place of a real next action - the only
+                // way that happens is NewAction coming back null, i.e. this response never
+                // matched a recognizable action heading at all (see the permissive-regex
+                // fix in ParseActionResponse). Not every non-final step's response needs to
+                // repro this again, but if it does, log the raw text the same way
+                // GameSession.SetRawStory already does for the main story - otherwise this
+                // class of bug can only ever be diagnosed by catching it live.
+                if (!isFinalStep && string.IsNullOrEmpty(parsed.NewAction))
+                    Debug.LogWarning("Action response had no usable 'New Player Action'. Raw LLM response:\n" + text);
+
+                // Confirmed in an actual playthrough: a NON-empty NewAction can still be
+                // garbage - the model echoed a paraphrase of its own prompt instructions
+                // instead of a real action (the empty-check above can't catch this, since
+                // the field wasn't empty). Check Result and NewClue too, since the same
+                // echoing could in principle land in either of those fields instead.
+                if (StoryParser.EchoedInstructionMarker.IsMatch(parsed.NewAction ?? "")
+                    || StoryParser.EchoedInstructionMarker.IsMatch(parsed.Result ?? "")
+                    || StoryParser.EchoedInstructionMarker.IsMatch(parsed.NewClue ?? ""))
+                    Debug.LogWarning("Action response looks like it echoed prompt instructions instead of real content. Raw LLM response:\n" + text);
+
+                onSuccess?.Invoke(parsed);
+            },
             onError);
     }
 

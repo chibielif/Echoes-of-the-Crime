@@ -17,6 +17,14 @@ public class GameManager : MonoBehaviour
     [SerializeField] private RectTransform cluesGroupParent;
     [SerializeField] private GameObject clueTemplate;
 
+    // Wraps outputText in a scroll view (Viewport/Content, same pattern as
+    // StoryDisplay's Scroll View) so a long, richly-detailed result can be read in full
+    // by scrolling instead of being hard-truncated to fit a fixed-height box. Both are
+    // optional (null-checked in SetOutputText) so this degrades gracefully if the scene
+    // wiring is ever missing.
+    [SerializeField] private ScrollRect outputScrollRect;
+    [SerializeField] private RectTransform outputContentRect;
+
     private const string FallbackNewAction = "Investigate further.";
 
     private class ActionBranch
@@ -59,7 +67,7 @@ public class GameManager : MonoBehaviour
         ParsedStory story = GameSession.Story;
         if (story == null)
         {
-            outputText.text = "No case has been generated yet. Start from the Main Menu.";
+            SetOutputText("No case has been generated yet. Start from the Main Menu.");
             SetButtonsInteractable(false);
             return;
         }
@@ -77,7 +85,7 @@ public class GameManager : MonoBehaviour
             branchSuspectNames[i] = i < namesForBranches.Count ? namesForBranches[i] : $"Suspect {i + 1}";
 
         string[] initialActions = GameSession.InitialActions;
-        outputText.text = "What will you do?";
+        SetOutputText("What will you do?");
         for (int i = 0; i < actionButtons.Length; i++)
         {
             int index = i;
@@ -127,7 +135,7 @@ public class GameManager : MonoBehaviour
         string previousActionsText = BuildHistoryText(branchHistories[index]);
 
         SetButtonsInteractable(false);
-        outputText.text = "...";
+        SetOutputText("...");
 
         StartCoroutine(client.RequestActionResult(
             GameSession.RawStory,
@@ -152,7 +160,7 @@ public class GameManager : MonoBehaviour
         // AddClueEntry can silently discard an incomplete/truncated fragment, and the
         // message shouldn't promise something that isn't there.
         bool clueAdded = response.NewClue != null && AddClueEntry(response.NewClue, index);
-        outputText.text = result + (clueAdded ? "\n\nNew clue found." : "");
+        SetOutputText(result + (clueAdded ? "\n\nNew clue found." : ""));
 
         if (branch.IsComplete)
             actionButtons[index].interactable = false;
@@ -166,7 +174,7 @@ public class GameManager : MonoBehaviour
     private void OnActionResultError(string message)
     {
         Debug.LogError("Action request failed: " + message);
-        outputText.text = "Something went wrong processing that action. Try again.";
+        SetOutputText("Something went wrong processing that action. Try again.");
         RefreshButtonInteractability();
     }
 
@@ -194,7 +202,7 @@ public class GameManager : MonoBehaviour
     private IEnumerator EnterGuessPhase()
     {
         SetButtonsInteractable(false);
-        outputText.text = "Guess the murderer.";
+        SetOutputText("Guess the murderer.");
 
         // Suspects are normally ready long before this point (a background follow-up
         // fetch, if one was even needed, has the entire rest of the playthrough to
@@ -234,7 +242,14 @@ public class GameManager : MonoBehaviour
 
         if (murdererIndex < 0)
         {
-            EndGame("The evidence doesn't clearly point to any one suspect here - there's no way to call this one right or wrong." + BuildRevealSuffix());
+            // Deliberately doesn't say "there's no way to call this one right or wrong"
+            // here - immediately following that with the full motive+proof reveal below
+            // directly contradicts it (confirmed in an actual playthrough: the message
+            // told the player the case couldn't be resolved, then named the murderer one
+            // sentence later). Just present the reveal on its own instead.
+            EndGame(GameSession.HasRealMurderer
+                ? $"Here's what really happened:\n\n{GameSession.RealMurderer}"
+                : "The case is closed, but no clear culprit could be determined.");
             return;
         }
 
@@ -254,7 +269,7 @@ public class GameManager : MonoBehaviour
             return;
         }
 
-        outputText.text = $"That's not them. {guessesRemaining} guess{(guessesRemaining == 1 ? "" : "es")} left.";
+        SetOutputText($"That's not them. {guessesRemaining} guess{(guessesRemaining == 1 ? "" : "es")} left.");
     }
 
     private static string BuildRevealSuffix() =>
@@ -263,7 +278,7 @@ public class GameManager : MonoBehaviour
     private void EndGame(string message)
     {
         gameEnded = true;
-        outputText.text = message;
+        SetOutputText(message);
 
         for (int i = 0; i < actionButtons.Length; i++)
             actionButtons[i].interactable = false;
@@ -431,5 +446,19 @@ public class GameManager : MonoBehaviour
     {
         if (cluesGroupParent != null)
             LayoutRebuilder.ForceRebuildLayoutImmediate(cluesGroupParent);
+    }
+
+    // Sets outputText and resets the scroll position to the top - same
+    // ForceRebuildLayoutImmediate + verticalNormalizedPosition pattern StoryDisplay.cs
+    // already uses, so a long result from a previous turn doesn't leave the view
+    // scrolled partway down when a new, shorter message replaces it.
+    private void SetOutputText(string text)
+    {
+        outputText.text = text;
+
+        if (outputContentRect != null)
+            LayoutRebuilder.ForceRebuildLayoutImmediate(outputContentRect);
+        if (outputScrollRect != null)
+            outputScrollRect.verticalNormalizedPosition = 1f;
     }
 }
