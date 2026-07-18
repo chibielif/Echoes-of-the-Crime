@@ -17,6 +17,21 @@ public class GameManager : MonoBehaviour
     [SerializeField] private RectTransform cluesGroupParent;
     [SerializeField] private GameObject clueTemplate;
 
+    // "CluesTag" header above the panel, and the two bottom-right buttons (renamed from
+    // their old Story/MainMenu-navigation roles - CluesButton/SuspectsButton) that
+    // toggle the SAME scroll view between showing clues and showing the suspects list,
+    // rather than each having its own separate view.
+    [SerializeField] private TMP_Text cluesTagText;
+    private const string CluesTagLabel = "CLUES";
+    private const string SuspectsTagLabel = "SUSPECTS";
+
+    // Every instantiated clue clone is tracked here (in addition to living under
+    // cluesGroupParent) so ShowSuspects()/ShowClues() can toggle them all inactive/active
+    // as a group without touching the suspects entry sharing the same parent.
+    private readonly List<GameObject> clueEntryObjects = new List<GameObject>();
+    private GameObject suspectsEntryObject;
+    private bool showingSuspects;
+
     // Wraps outputText in a scroll view (Viewport/Content, same pattern as
     // StoryDisplay's Scroll View) so a long, richly-detailed result can be read in full
     // by scrolling instead of being hard-truncated to fit a fixed-height box. Both are
@@ -98,7 +113,81 @@ public class GameManager : MonoBehaviour
         if (clueTemplate != null)
             clueTemplate.SetActive(false);
 
+        PopulateSuspectsEntry();
         StartCoroutine(PopulateCluesWhenReady());
+    }
+
+    // Builds the single suspects list-entry, sharing the same clueTemplate/
+    // cluesGroupParent the clue bullets already use, so it visually matches and slots
+    // into the same scroll view instead of needing a separate one. The text itself is
+    // filled in later, in ShowSuspects() (refreshed on every click, not just here) -
+    // see that method for why.
+    private void PopulateSuspectsEntry()
+    {
+        if (clueTemplate == null || cluesGroupParent == null)
+            return;
+
+        suspectsEntryObject = Instantiate(clueTemplate, cluesGroupParent);
+        suspectsEntryObject.SetActive(false);
+    }
+
+    // Prefers the full Suspects text block (names + descriptions/alibis) - those bare
+    // names are already visible on the guess buttons, so the reason to look here is the
+    // detail the guess buttons don't show. But the initial story parse can come back
+    // with an empty Suspects block, which kicks off a background RequestSuspects
+    // follow-up (LoadingController) that only ever fills in GameSession.SuspectNames
+    // (bare names), never this richer text block - if this were computed once at Start()
+    // (before that follow-up has necessarily finished) and never revisited, the panel
+    // could show "no suspects" forever even after the follow-up succeeded moments later.
+    // Recomputing on every ShowSuspects() call means the next click after the follow-up
+    // lands shows the correct thing instead.
+    private static string BuildSuspectsDisplayText()
+    {
+        ParsedStory story = GameSession.Story;
+        if (story != null && !string.IsNullOrWhiteSpace(story.Suspects))
+            return story.Suspects;
+
+        if (GameSession.HasSuspects)
+            return string.Join("\n", GameSession.SuspectNames);
+
+        return "No suspect details available.";
+    }
+
+    // Both are no-ops if the requested view is already showing, so repeatedly clicking
+    // the same button doesn't churn the layout for nothing.
+    public void ShowClues()
+    {
+        if (!showingSuspects)
+            return;
+
+        showingSuspects = false;
+        if (cluesTagText != null)
+            cluesTagText.text = CluesTagLabel;
+        if (suspectsEntryObject != null)
+            suspectsEntryObject.SetActive(false);
+        foreach (GameObject clueObj in clueEntryObjects)
+            clueObj.SetActive(true);
+        RebuildCluesLayout();
+    }
+
+    public void ShowSuspects()
+    {
+        if (showingSuspects)
+            return;
+
+        showingSuspects = true;
+        if (cluesTagText != null)
+            cluesTagText.text = SuspectsTagLabel;
+        foreach (GameObject clueObj in clueEntryObjects)
+            clueObj.SetActive(false);
+        if (suspectsEntryObject != null)
+        {
+            TMP_Text text = suspectsEntryObject.GetComponentInChildren<TMP_Text>(includeInactive: true);
+            if (text != null)
+                text.text = BuildSuspectsDisplayText();
+            suspectsEntryObject.SetActive(true);
+        }
+        RebuildCluesLayout();
     }
 
     private void OnActionClicked(int index)
@@ -384,6 +473,14 @@ public class GameManager : MonoBehaviour
         TMP_Text text = clone.GetComponentInChildren<TMP_Text>();
         if (text != null)
             text.text = formatted;
+
+        // A clue can be discovered while the Suspects view is the one currently showing
+        // (they share the same scroll view/parent) - without this, the new clue would
+        // pop up active and visible right in the middle of the suspects entry instead of
+        // staying hidden until the player switches back to Clues.
+        clueEntryObjects.Add(clone);
+        if (showingSuspects)
+            clone.SetActive(false);
 
         RebuildCluesLayout();
         return true;

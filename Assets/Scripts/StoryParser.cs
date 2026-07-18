@@ -339,11 +339,26 @@ public static class StoryParser
     private const string ClueHeaderPattern = @"new\s+clue[^:.?\n]*[:.?]";
 
     // A header phrase must start its own line - optionally with markdown "#"/"*" noise
-    // in front, same leniency as CandidateHeadingLine elsewhere in this file - but
-    // nothing else before it. Used to stop ParseActionResponse's action/clue search from
-    // locking onto a hallucinated mid-sentence mention of the phrase instead of the real,
-    // standalone header (see the comment at the actionMatch/clueMatch call sites below).
-    private const string HeaderLinePrefix = @"^[ \t]*#{0,6}[ \t]*\**[ \t]*";
+    // in front (same leniency as CandidateHeadingLine elsewhere in this file), and now
+    // also optionally ONE short leading word ("A new clue discovered:" - confirmed in an
+    // actual playthrough, where the bare line-start requirement rejected this because of
+    // the leading "A "). Bounded to a short run of letters so it can't swallow a whole
+    // hallucinated clause the way an unbounded prefix would - the protection against a
+    // hallucinated MID-SENTENCE mention (e.g. "Now, provide a new clue about Ethan Vale,
+    // only if you have one...") is still this being anchored to the line start: that
+    // phrase sits several words into the middle of its own line with no legitimate
+    // header reachable from where the line actually begins, so it still can't satisfy
+    // this prefix no matter how many leading words are allowed.
+    private const string OptionalLeadWord = @"(?:[A-Za-z]{1,15}[ \t]+)?";
+    private const string HeaderLinePrefix = @"^[ \t]*" + OptionalLeadWord + @"#{0,6}[ \t]*\**[ \t]*";
+
+    // "What would you like the detective to do now?"/"What would you like to do now?" -
+    // confirmed variants of the model abandoning the "New Player Action:" header and
+    // addressing the player directly instead. Deliberately not anchored to a line start
+    // like the real headers above (unlike those, this phrase has no fixed markdown
+    // styling convention confirmed yet, so line-anchoring would just be guessing) -
+    // matched loosely up to whichever terminator (?/.) the model used.
+    private const string MenuPromptPattern = @"what\s+would\s+you\s+like\b[^\n?.]*\bto\s+do\b[^\n?.]*[?.]";
 
     // A "##"/"###"-prefixed line is a strong sign of hallucinated continuation in a full
     // story response too - but there it's expected (real section headers), which is why
@@ -371,8 +386,8 @@ public static class StoryParser
             string headingLine = raw.Substring(headingStart, lineEnd - headingStart);
 
             bool isLegitimate =
-                Regex.IsMatch(headingLine, "^" + ActionHeaderPattern, RegexOptions.IgnoreCase)
-                || Regex.IsMatch(headingLine, "^" + ClueHeaderPattern, RegexOptions.IgnoreCase)
+                Regex.IsMatch(headingLine, "^" + OptionalLeadWord + ActionHeaderPattern, RegexOptions.IgnoreCase)
+                || Regex.IsMatch(headingLine, "^" + OptionalLeadWord + ClueHeaderPattern, RegexOptions.IgnoreCase)
                 || Regex.IsMatch(headingLine, @"^end\s*$", RegexOptions.IgnoreCase);
 
             if (!isLegitimate)
@@ -515,6 +530,24 @@ public static class StoryParser
         // header and its real content) got folded into a garbled NewClue.
         Match actionMatch = Regex.Match(raw, HeaderLinePrefix + ActionHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
+        // The model sometimes abandons the "New Player Action:" header entirely and
+        // instead asks the player directly what to do next - "What would you like the
+        // detective to do now?"/"What would you like to do now?" - followed by its own
+        // numbered/bulleted menu of options. Confirmed in an actual playthrough: this used
+        // to leave NewAction completely empty (no header for actionMatch to find at all,
+        // so GameManager fell back to its generic "Investigate further." placeholder)
+        // despite the raw response clearly offering a perfectly usable menu of real
+        // actions - and separately, the question itself used to leak verbatim into the
+        // displayed Result text, since it doesn't contain "players" (the only direct-
+        // address signal HallucinatedMenuMarker checks for) when phrased as "the
+        // detective" or with no addressee at all. Only used as a fallback when the real
+        // header wasn't found - if a genuine "New Player Action:" header exists, trust it
+        // over this, since a real action is always a stronger signal than this fallback.
+        Match menuPromptMatch = actionMatch.Success
+            ? Match.Empty
+            : Regex.Match(raw, MenuPromptPattern, RegexOptions.IgnoreCase);
+        Match effectiveActionMatch = menuPromptMatch.Success ? menuPromptMatch : actionMatch;
+
         // The model's phrasing for this header varies ("New clue discovered:", "New Clue
         // Found:", "New Clue Discovered?", bare "New Clue:", etc.) - match "new clue"
         // followed by anything up to whichever terminator it used (colon, period, or
@@ -522,29 +555,49 @@ public static class StoryParser
         Match clueMatch = Regex.Match(raw, HeaderLinePrefix + ClueHeaderPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
         int resultEnd = raw.Length;
-        if (actionMatch.Success) resultEnd = Math.Min(resultEnd, actionMatch.Index);
+        if (effectiveActionMatch.Success) resultEnd = Math.Min(resultEnd, effectiveActionMatch.Index);
         if (clueMatch.Success) resultEnd = Math.Min(resultEnd, clueMatch.Index);
         result.Result = TruncateResult(StripMarkers(TrimHallucinatedMenu(raw.Substring(0, resultEnd))));
 
-        if (actionMatch.Success)
+        if (effectiveActionMatch.Success)
         {
-            int start = actionMatch.Index + actionMatch.Length;
-            int end = clueMatch.Success && clueMatch.Index > actionMatch.Index ? clueMatch.Index : raw.Length;
+            int start = effectiveActionMatch.Index + effectiveActionMatch.Length;
+            int end = clueMatch.Success && clueMatch.Index > effectiveActionMatch.Index ? clueMatch.Index : raw.Length;
             string actionBlock = StripMarkers(raw.Substring(start, end - start));
 
             // The model was asked for exactly one action but sometimes replies with a
-            // numbered/bulleted list anyway - take just the first item when that happens.
-            // It also sometimes writes multiple plain sentences with no bullets at all
-            // (e.g. "Investigate X... Continue the investigation.") - cutting at the
-            // first genuine sentence end catches that case too.
+            // numbered/bulleted list anyway - take just the first item when that happens
+            // (this is also exactly how a "what would you like to do?"-style menu gets
+            // reduced to a single real action above). It also sometimes writes multiple
+            // plain sentences with no bullets at all (e.g. "Investigate X... Continue the
+            // investigation.") - cutting at the first genuine sentence end catches that
+            // case too.
             List<string> items = ExtractListItems(actionBlock);
             result.NewAction = TruncateToFirstSentence(items.Count > 0 ? items[0] : actionBlock);
+        }
+        else
+        {
+            // Last resort: the model sometimes invents its own ad-hoc heading before the
+            // options menu instead of either "New Player Action:" or "What would you like
+            // to do" phrasing - e.g. "Investigative Option(s):". Confirmed in an actual
+            // playthrough. Since the exact wording keeps varying every time, don't try to
+            // recognize it at all - just look for "a list of options sitting at the end
+            // of the response," which is the one part of the shape that actually has
+            // been consistent across every confirmed variant so far. Only reached when
+            // neither a real header nor the menu-prompt phrasing matched anything.
+            int trailingListStart = FindTrailingListBlockStart(raw);
+            if (trailingListStart >= 0)
+            {
+                List<string> items = ExtractListItems(StripMarkers(raw.Substring(trailingListStart)));
+                if (items.Count > 0)
+                    result.NewAction = TruncateToFirstSentence(items[0]);
+            }
         }
 
         if (clueMatch.Success)
         {
             int start = clueMatch.Index + clueMatch.Length;
-            int end = actionMatch.Success && actionMatch.Index > clueMatch.Index ? actionMatch.Index : raw.Length;
+            int end = effectiveActionMatch.Success && effectiveActionMatch.Index > clueMatch.Index ? effectiveActionMatch.Index : raw.Length;
             string clueBlock = CleanCluePreamble(StripMarkers(raw.Substring(start, end - start)));
 
             // The model was asked for a single clue but sometimes lists two or three under
@@ -981,6 +1034,33 @@ public static class StoryParser
                 items.Add(item);
         }
         return items;
+    }
+
+    // Finds the start of the LAST run of consecutive numbered/bulleted list-item lines
+    // in the raw text - used by ParseActionResponse as a final fallback for recovering
+    // NewAction when neither a real action header nor the "what would you like to do"
+    // phrasing matched anything. Walks backward from the final list-item line, only
+    // extending the block backward while consecutive items are separated by nothing but
+    // blank lines - a paragraph of unrelated prose in between means an earlier match
+    // belongs to a different, earlier list, not this trailing one.
+    private static int FindTrailingListBlockStart(string raw)
+    {
+        MatchCollection matches = Regex.Matches(raw, @"^[ \t]*(?:\d+[.\)]|[-*•])[ \t]*\S", RegexOptions.Multiline);
+        if (matches.Count == 0)
+            return -1;
+
+        int blockStart = matches[matches.Count - 1].Index;
+        for (int i = matches.Count - 2; i >= 0; i--)
+        {
+            int itemLineEnd = raw.IndexOf('\n', matches[i].Index);
+            if (itemLineEnd < 0) itemLineEnd = raw.Length;
+            string gap = raw.Substring(itemLineEnd, matches[i + 1].Index - itemLineEnd);
+            if (string.IsNullOrWhiteSpace(gap))
+                blockStart = matches[i].Index;
+            else
+                break;
+        }
+        return blockStart;
     }
 
     private static string[] ExtractNumberedLines(string content)
