@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
@@ -182,9 +183,26 @@ public class LoadingController : MonoBehaviour
             Destroy(gameObject);
     }
 
+    private const float MainMenuRedirectDelay = 10f;
+
+    // The main story request has no retry (unlike the four follow-ups above) - it's the
+    // very first thing that happens on entering the game, so there's nothing to fall
+    // back to if it fails. Previously this just left statusText showing the error with
+    // no path forward at all - a permanent dead end on the Loading screen, whether the
+    // failure was a timeout ("delayed", from LLMStoryClient.PollForCompletion giving up)
+    // or RunPod itself reporting the job CANCELLED. Now it tells the player where
+    // they're headed and actually takes them there instead of stranding them.
     private void OnError(string message)
     {
-        statusText.text = "Something went wrong generating your case:\n" + message;
         Debug.LogError(message);
+        statusText.text = "Something went wrong generating your case:\n" + message +
+            "\n\nYou're being directed to Main Menu...";
+        StartCoroutine(ReturnToMainMenuAfterDelay());
+    }
+
+    private IEnumerator ReturnToMainMenuAfterDelay()
+    {
+        yield return new WaitForSeconds(MainMenuRedirectDelay);
+        SceneManager.LoadScene("MainMenu");
     }
 }
