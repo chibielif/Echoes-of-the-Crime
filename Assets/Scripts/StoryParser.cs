@@ -41,13 +41,30 @@ public static class StoryParser
     // #'s), same as the bare-line alternative above - a "####" line always safely acts as
     // a boundary-only marker (StripMarkers deletes any "#"-prefixed line's content
     // wholesale anyway), so this can't be mistaken for real body text.
+    // OR a bare, unmarked heading with real content trailing on the SAME line (e.g. "Real
+    // Murderer: Renna Dill - using the missing key..."), which the standalone-bare
+    // alternative above can't catch since it requires nothing after the colon, and the
+    // marked-up alternative can't catch since it requires # or ** markup. Confirmed in an
+    // actual playthrough - a serious one: the model wrote "Clue: <text>" and "Real
+    // Murderer: <text>" as bare same-line labels after the Suspects section, and since
+    // neither matched any existing alternative, both (and everything after, up to the next
+    // recognized heading) silently became trailing content of Suspects - meaning the
+    // murderer reveal itself rendered verbatim on the Story screen, a real spoiler, not
+    // just a formatting nit. This alternative alone would be dangerous unrestricted (it
+    // would treat any ordinary "Word: sentence." prose as a heading) - what makes it safe
+    // is that it's still filtered by the same isKnown-or-standalone gate in Parse() below:
+    // since content trails on the same line, standalone is always false for a match here,
+    // so it only ever actually becomes a boundary when the label is a recognized keyword
+    // (see KnownHeadingKeywords) - an unrecognized bare "Word: sentence" is found as a
+    // candidate but then discarded, same as it always was.
     // See Parse() for why an unmarked/unrecognized heading additionally needs to be
     // standalone before it's trusted as a real boundary - this regex only finds candidates.
     private static readonly Regex CandidateHeadingLine = new Regex(
         @"^[ \t]*(?:#{1,6}[ \t]*\**|\*\*)([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)\**[ \t]*:" +
         @"|^[ \t]*([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)[ \t]*:[ \t]*$" +
         @"|^[ \t]*(what\s+really\s+happened)\s*\??[ \t]*$" +
-        @"|^[ \t]*#{1,6}[ \t]*\**([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)\**[ \t]*$",
+        @"|^[ \t]*#{1,6}[ \t]*\**([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)\**[ \t]*$" +
+        @"|^[ \t]*([A-Za-z][A-Za-z0-9 '\-#]{0,40}?)[ \t]*:[ \t]+(?=\S)",
         RegexOptions.Multiline | RegexOptions.IgnoreCase);
 
     // Which known field a detected heading's text belongs to, checked by keyword rather
@@ -78,15 +95,16 @@ public static class StoryParser
         return null;
     }
 
-    // CandidateHeadingLine has four alternatives (marked-up-with-colon, bare-standalone-
-    // with-colon, the "what really happened" paraphrase, and bare markdown-header-with-
-    // no-colon), which land in different capture groups.
+    // CandidateHeadingLine has five alternatives (marked-up-with-colon, bare-standalone-
+    // with-colon, the "what really happened" paraphrase, bare markdown-header-with-
+    // no-colon, and bare-with-same-line-content), which land in different capture groups.
     private static string GetHeadingText(Match headingLine)
     {
         if (headingLine.Groups[1].Success) return headingLine.Groups[1].Value;
         if (headingLine.Groups[2].Success) return headingLine.Groups[2].Value;
         if (headingLine.Groups[3].Success) return headingLine.Groups[3].Value;
-        return headingLine.Groups[4].Value;
+        if (headingLine.Groups[4].Success) return headingLine.Groups[4].Value;
+        return headingLine.Groups[5].Value;
     }
 
     // Whether nothing but whitespace/asterisks follows a position through to the end of
@@ -119,9 +137,26 @@ public static class StoryParser
         var headingLines = new List<Match>();
         foreach (Match candidate in CandidateHeadingLine.Matches(raw))
         {
-            bool isKnown = ClassifyHeading(GetHeadingText(candidate)) != null;
+            string headingKey = ClassifyHeading(GetHeadingText(candidate));
             bool standalone = RestOfLineIsBlank(raw, candidate.Index + candidate.Length);
-            if (isKnown || standalone)
+
+            // CandidateHeadingLine's 5th alternative (bare heading, no markup, real
+            // content trailing on the same line) is narrower than the other four -
+            // confirmed via direct testing that trusting it for every known field is too
+            // easy to trip on ordinary narrative prose that happens to start a line with
+            // a common word immediately followed by a colon: "Suspects: three people had
+            // motive..." as an ordinary Crime Scene sentence wrongly carved out a bogus
+            // Suspects heading right there, wiping out the real Crime Scene content that
+            // should have followed. Scoped to just "Clues"/"RealMurderer" - the two
+            // fields actually confirmed (in a real playthrough, a serious one - the
+            // murderer reveal itself leaked onto the Story screen) to use this bare
+            // same-line style, rather than opening it up to all seven known fields on
+            // pure speculation.
+            bool isBareSameLine = candidate.Groups[5].Success;
+            bool trusted = headingKey != null
+                && (!isBareSameLine || headingKey == "Clues" || headingKey == "RealMurderer");
+
+            if (trusted || standalone)
                 headingLines.Add(candidate);
         }
 
@@ -154,7 +189,7 @@ public static class StoryParser
 
             int start = headingLines[i].Index + headingLines[i].Length;
             int end = i + 1 < headingLines.Count ? headingLines[i + 1].Index : raw.Length;
-            string content = StripMarkers(raw.Substring(start, end - start));
+            string content = TrimHallucinatedQuestion(StripMarkers(raw.Substring(start, end - start)));
 
             if (!sectionParts.TryGetValue(key, out List<string> parts))
                 sectionParts[key] = parts = new List<string>();
@@ -204,6 +239,33 @@ public static class StoryParser
         var sb = new StringBuilder();
         foreach (string part in parts)
         {
+            // A single part can itself already contain its own numbered/bulleted list -
+            // e.g. a normal "Clues:" heading with 3 numbered clues underneath, alongside
+            // a second "Final Clue:" heading for a 4th. Confirmed in an actual
+            // playthrough: flattening a part like that down to one line the same way a
+            // genuinely single-item part (like "Final Clue:"'s own one paragraph) is
+            // flattened collapsed all 3 clues into one run-on blob, which broke
+            // ExtractListItems' downstream ability to split them back apart - and left a
+            // stray leading "1." sitting in the middle of what looked like plain prose,
+            // which GameManager.TruncateClue then mistook for a complete one-token
+            // "sentence" (a digit followed by a period followed by a capital letter
+            // satisfies its sentence-end check), truncating the whole clue down to just
+            // "1.". Re-splitting a multi-item part into its own items first - falling
+            // back to the old whole-part flatten only when a part has no list of its own
+            // - keeps every individual item intact regardless of which heading
+            // contributed it.
+            List<string> ownItems = ExtractListItems(part);
+            if (ownItems.Count > 1)
+            {
+                foreach (string item in ownItems)
+                {
+                    string flattenedItem = Regex.Replace(item, @"\s+", " ").Trim();
+                    if (flattenedItem.Length > 0)
+                        sb.Append("- ").Append(flattenedItem).Append('\n');
+                }
+                continue;
+            }
+
             string flattened = Regex.Replace(part, @"\s+", " ").Trim();
             if (flattened.Length > 0)
                 sb.Append("- ").Append(flattened).Append('\n');
@@ -320,8 +382,25 @@ public static class StoryParser
     // cut at the start of whichever offending line comes first, not just the trigger
     // word, so a fragment like "What would you like the" doesn't survive as trailing
     // junk.
+    //
+    // A further variant confirmed in an actual playthrough: instead of a numbered/
+    // bulleted menu, the model can hallucinate a lettered multiple-choice quiz -
+    // "What clue does this envelope reveal?" followed by "A. ...", "B. ...", "C. ..." -
+    // which the digit/bullet-only marker above doesn't catch at all (A./B. aren't
+    // \d+[.\)] or [-*•]), so it used to survive straight into the displayed Result. A
+    // single lettered line isn't enough of a signal on its own to treat as a hard stop -
+    // it would false-positive on a genuine name written with a spaced initial ("A. J.
+    // Reeves refused to comment.") - so this requires at least TWO consecutive lettered-
+    // marker lines before it's trusted, which a real multiple-choice list always has but
+    // an ordinary sentence with an initial never does. The "what clue does this X
+    // reveal?" question itself is also matched directly (same unanchored treatment as
+    // "players?" above, since Result is free-form prose with no fixed line shape to
+    // anchor to) - without it, trimming just the lettered options left the question
+    // dangling on its own as if it were genuine narration, once its own answer choices
+    // were gone the question mark satisfied the normal end-of-Result sentence boundary.
     private static readonly Regex HallucinatedMenuMarker = new Regex(
-        @"^\s*(?:\d+[.\)]|[-*•])\s|^.*\bplayers?\b.*$", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+        @"^\s*(?:\d+[.\)]|[-*•])\s|^.*\bplayers?\b.*$|(?:^[ \t]*[A-Za-z][.\)][ \t]+\S[^\n]*\r?\n?){2,}|what\s+clue[^\n?]*\?",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline);
 
     private static string TrimHallucinatedMenu(string text)
     {
@@ -330,6 +409,39 @@ public static class StoryParser
 
         Match m = HallucinatedMenuMarker.Match(text);
         return m.Success ? text.Substring(0, m.Index).Trim() : text;
+    }
+
+    // Unlike TrimHallucinatedMenu above (only safe for Result/RealMurderer, which should
+    // never contain a numbered list at all), this can't use the same blind "any numbered
+    // line" check - Suspects/Clues/InitialActions are exactly the sections that ARE
+    // supposed to contain one, so that marker would wrongly cut off the real content at
+    // its own first legitimate list item. Confirmed in an actual playthrough: the model
+    // hallucinated "What would you like me to say?" plus its own self-answered numbered
+    // list right after a genuine "Clues:" list, which - since the question itself doesn't
+    // end in a colon and isn't recognized as a heading boundary - silently became trailing
+    // content of the Clues section instead of being dropped.
+    //
+    // Unlike ParseActionResponse's use of the same MenuPromptPattern (deliberately
+    // unanchored there, since Result is free-form prose with no fixed shape to anchor
+    // to), this one IS anchored to a standalone line. Confirmed necessary via direct
+    // testing: a suspect's own quoted dialogue can innocently contain a phrase like "what
+    // would you like me to do about the broken lock?" as characterization, sitting
+    // mid-sentence inside an otherwise ordinary Suspects paragraph - matching it
+    // unanchored wrongly truncated the entire section right there. The genuine
+    // hallucination confirmed above always presents as its own interjected line (a full
+    // paragraph break before and after), which a quoted rhetorical question buried
+    // mid-sentence can't satisfy, so anchoring catches the real case while leaving
+    // legitimate narrative content alone.
+    private static readonly Regex HallucinatedQuestionLine = new Regex(
+        @"^[ \t]*\**[ \t]*" + MenuPromptPattern, RegexOptions.IgnoreCase | RegexOptions.Multiline);
+
+    private static string TrimHallucinatedQuestion(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return content;
+
+        Match m = HallucinatedQuestionLine.Match(content);
+        return m.Success ? content.Substring(0, m.Index).Trim() : content;
     }
 
     // Shared with ParseActionResponse (and with FindFakeHeaderCutoff just below) so the
@@ -357,8 +469,15 @@ public static class StoryParser
     // addressing the player directly instead. Deliberately not anchored to a line start
     // like the real headers above (unlike those, this phrase has no fixed markdown
     // styling convention confirmed yet, so line-anchoring would just be guessing) -
-    // matched loosely up to whichever terminator (?/.) the model used.
-    private const string MenuPromptPattern = @"what\s+would\s+you\s+like\b[^\n?.]*\bto\s+do\b[^\n?.]*[?.]";
+    // matched loosely up to whichever terminator (?/.) the model used. Also confirmed in
+    // the main story response itself (not just per-turn results): the model can
+    // hallucinate this same direct-address interjection - "What would you like me to
+    // say?" plus its own self-answered numbered list - immediately after the Clues
+    // section, before recovering with the real "Initial Player Actions:" heading. "to
+    // say" broadens the original "to do"-only match to cover that variant too, shared
+    // by both Parse() (see TrimHallucinatedQuestion) and ParseActionResponse so the two
+    // definitions of this hallucination can't drift apart.
+    private const string MenuPromptPattern = @"what\s+would\s+you\s+like\b[^\n?.]*\bto\s+(?:do|say)\b[^\n?.]*[?.]";
 
     // A "##"/"###"-prefixed line is a strong sign of hallucinated continuation in a full
     // story response too - but there it's expected (real section headers), which is why
@@ -984,6 +1103,13 @@ public static class StoryParser
         // injects between paragraphs - whether bare or with leftover echoed prompt text
         // trailing after the hashes (e.g. "### At least 5").
         content = Regex.Replace(content, @"^\s*#+.*$", "", RegexOptions.Multiline);
+
+        // The model occasionally wraps part of its answer in a markdown code fence
+        // (```) - confirmed in an actual playthrough, sitting on its own line right
+        // after a hallucinated question and before a hallucinated multiple-choice list.
+        // Never legitimate content in any field here, same treatment as the "#" lines
+        // just above.
+        content = Regex.Replace(content, @"^\s*```\s*$", "", RegexOptions.Multiline);
 
         // It also sometimes closes a section with a bare "End" line (no "#" prefix) -
         // strip that too, but only as a standalone line so "end" appearing naturally

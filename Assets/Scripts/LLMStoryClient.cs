@@ -39,7 +39,10 @@ public class LLMStoryClient : MonoBehaviour
         "Important: The \"Real Murderer:\" section MUST include a one-sentence motive (why they did it) and one " +
         "specific piece of decisive proof - never just a name alone. The decisive proof MUST correspond to one of " +
         "the clues you already listed under \"Clues:\" above - do not invent a new piece of evidence the player " +
-        "never had access to.\n\n" +
+        "never had access to.\n" +
+        "Important: Never address the player directly or ask a question like \"What would you like me to say?\" " +
+        "anywhere in this response - go straight from the Clues section to the Real Murderer section and then " +
+        "the Initial Player Actions, with no question or dialogue options in between.\n\n" +
         "### Response:";
 
     private const string FollowUpPromptTemplate =
@@ -219,9 +222,13 @@ public class LLMStoryClient : MonoBehaviour
         "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
         "Important: Refer to the detective performing this investigation as \"you\" - never invent a personal " +
         "name for them (e.g. never \"Detective Mark\" or similar).\n" +
+        "Important: Never ask the player a question or offer them multiple-choice options (e.g. \"What clue " +
+        "does this reveal? A. ... B. ...\") - state the result and the new clue directly, as narration, never " +
+        "as a question with answer choices.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
         "Reminder: refer to the detective as \"you\", never by an invented name.\n" +
+        "Reminder: never ask a question or offer multiple-choice options - narrate the result and clue directly.\n" +
         "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
@@ -248,9 +255,13 @@ public class LLMStoryClient : MonoBehaviour
         "Important: Everything you write here MUST be about {5} specifically - never a different suspect.\n" +
         "Important: Refer to the detective performing this investigation as \"you\" - never invent a personal " +
         "name for them (e.g. never \"Detective Mark\" or similar).\n" +
+        "Important: Never ask the player a question or offer them multiple-choice options (e.g. \"What clue " +
+        "does this reveal? A. ... B. ...\") - state the result and the new clue directly, as narration, never " +
+        "as a question with answer choices.\n" +
         "Important: You MUST end your response with the line:\n### End\n\n" +
         "Reminder (do NOT reveal to the player): the real murderer is {4}.\n" +
         "Reminder: refer to the detective as \"you\", never by an invented name.\n" +
+        "Reminder: never ask a question or offer multiple-choice options - narrate the result and clue directly.\n" +
         "Now, write the result of this exact action about {5}: \"{2}\"\n\n" +
         "### Response:";
 
