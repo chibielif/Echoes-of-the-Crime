@@ -14,9 +14,10 @@
 # Plastic SCM metadata (not used - this repo is git-only)
 /.plastic/
 
-# Editor/IDE config
-/.idea/
-/.vscode/
+# Editor/IDE config (anywhere in the tree, not just the root)
+.idea/
+.vscode/
+
 
 # Third-party Asset Store package - Standard EULA doesn't allow
 # redistributing the raw source files, only shipping them in a build
