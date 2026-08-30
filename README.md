@@ -31,10 +31,7 @@ pieces it depends on can't be included:
   inference endpoint serving the fine-tuned model. Its URL and API key
   live in `Assets/Config/LLMEndpointConfig.asset`, which is deliberately
   untracked — so a fresh clone has no endpoint to generate cases from,
-  and the game can't get past the Loading scene. (If you fine-tune and
-  host your own model with the [`docs/llm-training`](docs/llm-training)
-  notebook, you can create that config asset yourself and point it at
-  your endpoint.)
+  and the game can't get past the Loading scene.
 - **The UI asset pack.** The interface uses the "Cartoon GUI Pack"
   Asset Store package, whose EULA doesn't allow redistributing the raw
   source files, so `Assets/GUIPackCartoon/` is excluded and the scenes
