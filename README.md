@@ -22,13 +22,20 @@ fine-tune the model that powers case generation.
 - TextMeshPro for UI
 - A LoRA-fine-tuned LLM served from a hosted inference endpoint
 
-## Running locally
+## Why you can't run this from source
 
-Open the project in Unity Hub and press Play from the `MainMenu` scene.
-An LLM endpoint must be configured (`Assets/Config/LLMEndpointConfig.asset`,
-not tracked in git since it holds an API key) for case generation to work.
+This repo is meant as a code reference, not a playable build — two
+pieces it depends on can't be included:
 
-The UI uses the "Cartoon GUI Pack" Asset Store package, which isn't
-included in this repo (its EULA doesn't allow redistributing the raw
-source files) — re-import it from the Asset Store into
-`Assets/GUIPackCartoon/` if you're building the project from source.
+- **The LLM endpoint.** Case generation talks to a private, paid
+  inference endpoint serving the fine-tuned model. Its URL and API key
+  live in `Assets/Config/LLMEndpointConfig.asset`, which is deliberately
+  untracked — so a fresh clone has no endpoint to generate cases from,
+  and the game can't get past the Loading scene. (If you fine-tune and
+  host your own model with the [`docs/llm-training`](docs/llm-training)
+  notebook, you can create that config asset yourself and point it at
+  your endpoint.)
+- **The UI asset pack.** The interface uses the "Cartoon GUI Pack"
+  Asset Store package, whose EULA doesn't allow redistributing the raw
+  source files, so `Assets/GUIPackCartoon/` is excluded and the scenes
+  reference art that isn't in the repo.
